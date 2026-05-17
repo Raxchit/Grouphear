@@ -131,6 +131,14 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     handleDisconnect(socket);
   });
+
+  // Host can update audio source type (for UI display)
+  socket.on("audio:source", (data: { source: string }) => {
+    const sessionId = socket.data.sessionId;
+    if (!sessionId || socket.data.role !== "host") return;
+
+    socket.to(`session:${sessionId}`).emit("audio:source", data);
+  });
 });
 
 function handleDisconnect(socket: any) {
@@ -168,5 +176,5 @@ function generateId(): string {
 }
 
 httpServer.listen(PORT, () => {
-  console.log(`🎙️  Audio Stream Service running on port ${PORT}`);
+  console.log(`🎵 GroupHear Audio Relay running on port ${PORT}`);
 });

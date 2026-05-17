@@ -1,12 +1,11 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Radio,
   Headphones,
   Wifi,
-  WifiOff,
   Users,
   Mic,
   MicOff,
@@ -14,8 +13,6 @@ import {
   VolumeX,
   Play,
   Square,
-  ChevronDown,
-  ChevronUp,
   Smartphone,
   Shield,
   Zap,
@@ -30,6 +27,9 @@ import {
   MonitorSmartphone,
   AudioWaveform,
   RadioTower,
+  Music,
+  Youtube,
+  Disc3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,7 +50,6 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { Progress } from "@/components/ui/progress";
-import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
 import { io, Socket } from "socket.io-client";
 
@@ -78,6 +77,24 @@ interface ListenerInfo {
 }
 
 // ──────────────────────────────────────────────
+// Waveform Bars (standalone component)
+// ──────────────────────────────────────────────
+function WaveformBars({ active, color1, color2, level }: { active: boolean; color1: string; color2: string; level: number }) {
+  return (
+    <div className="flex items-center justify-center gap-[3px] h-20">
+      {Array.from({ length: 40 }).map((_, i) => (
+        <motion.div
+          key={i}
+          className={`w-1.5 rounded-full bg-gradient-to-t ${color1} ${color2}`}
+          animate={{ height: active ? Math.max(8, Math.sin(Date.now() / 200 + i * 0.5) * 30 * (level / 100) + 10) : 8 }}
+          transition={{ duration: 0.1, ease: "easeOut" }}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────
 // Audio Stream Demo Component
 // ──────────────────────────────────────────────
 function AudioStreamDemo() {
@@ -90,10 +107,9 @@ function AudioStreamDemo() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
+  const [audioSource, setAudioSource] = useState<"mic" | "system">("system");
   const [listeners, setListeners] = useState<ListenerInfo[]>([]);
-  const [discoveredSessions, setDiscoveredSessions] = useState<
-    DiscoveredSession[]
-  >([]);
+  const [discoveredSessions, setDiscoveredSessions] = useState<DiscoveredSession[]>([]);
   const [audioLevel, setAudioLevel] = useState(0);
   const [latency, setLatency] = useState(0);
   const [bufferProgress, setBufferProgress] = useState(0);
@@ -108,12 +124,36 @@ function AudioStreamDemo() {
   const playbackContextRef = useRef<AudioContext | null>(null);
   const isPlayingRef = useRef(false);
   const roleRef = useRef(role);
-  roleRef.current = role;
-
-  // Ref for self-referencing playNextChunk
   const playNextChunkRef = useRef<() => void>(() => {});
+  const [socketConnected, setSocketConnected] = useState(false);
 
-  // ─── Stop streaming (host side) ───
+  // Sync refs with state (must use useEffect for strict mode compliance)
+  useEffect(() => { roleRef.current = role; }, [role]);
+
+  // Assign playNextChunk implementation via useEffect
+  useEffect(() => {
+    playNextChunkRef.current = () => {
+      if (playbackQueueRef.current.length === 0) {
+        isPlayingRef.current = false;
+        return;
+      }
+      isPlayingRef.current = true;
+      const chunk = playbackQueueRef.current.shift()!;
+      const ctx = playbackContextRef.current;
+      if (!ctx) return;
+
+      const buffer = ctx.createBuffer(1, chunk.length, ctx.sampleRate);
+      buffer.getChannelData(0).set(chunk);
+
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(ctx.destination);
+      src.onended = () => playNextChunkRef.current();
+      src.start();
+    };
+  }, []);
+
+  // ─── Stop streaming ───
   const stopStreaming = useCallback(() => {
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
@@ -127,51 +167,28 @@ function AudioStreamDemo() {
     setAudioLevel(0);
   }, []);
 
-  // ─── Playback: play next chunk from queue ───
-  // Implemented via ref to allow self-reference without hoisting issues
-  playNextChunkRef.current = () => {
-    if (playbackQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      return;
-    }
-    isPlayingRef.current = true;
-    const chunk = playbackQueueRef.current.shift()!;
-    const ctx = playbackContextRef.current;
-    if (!ctx) return;
 
-    const buffer = ctx.createBuffer(1, chunk.length, ctx.sampleRate);
-    buffer.getChannelData(0).set(chunk);
 
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    source.onended = () => playNextChunkRef.current();
-    source.start();
-  };
+  // ─── Start playback (listener) ───
+  const startPlayback = useCallback((sampleRate: number) => {
+    const ctx = new AudioContext({ sampleRate });
+    playbackContextRef.current = ctx;
+    isPlayingRef.current = false;
+    playbackQueueRef.current = [];
 
-  // ─── Start playback (listener side) ───
-  const startPlayback = useCallback(
-    (sampleRate: number) => {
-      const ctx = new AudioContext({ sampleRate });
-      playbackContextRef.current = ctx;
-      isPlayingRef.current = false;
-      playbackQueueRef.current = [];
+    let bufProg = 0;
+    const bufInterval = setInterval(() => {
+      bufProg += 20;
+      setBufferProgress(Math.min(bufProg, 100));
+      if (bufProg >= 100) {
+        clearInterval(bufInterval);
+        isPlayingRef.current = true;
+        playNextChunkRef.current();
+      }
+    }, 200);
+  }, []);
 
-      let bufProg = 0;
-      const bufInterval = setInterval(() => {
-        bufProg += 20;
-        setBufferProgress(Math.min(bufProg, 100));
-        if (bufProg >= 100) {
-          clearInterval(bufInterval);
-          isPlayingRef.current = true;
-          playNextChunkRef.current();
-        }
-      }, 200);
-    },
-    []
-  );
-
-  // ─── Reset all state ───
+  // ─── Reset ───
   const resetState = useCallback(() => {
     stopStreaming();
     if (playbackContextRef.current) {
@@ -190,7 +207,7 @@ function AudioStreamDemo() {
     socketRef.current = null;
   }, [stopStreaming]);
 
-  // ─── Connect to socket ───
+  // ─── Connect socket ───
   const connectSocket = useCallback(() => {
     if (socketRef.current?.connected) return;
 
@@ -198,50 +215,37 @@ function AudioStreamDemo() {
       transports: ["websocket"],
     });
 
-    socket.on("connect", () => {
-      console.log("Socket connected:", socket.id);
-    });
+    socket.on("connect", () => { console.log("Socket connected:", socket.id); setSocketConnected(true); });
 
-    socket.on("connect_error", (err) => {
-      console.error("Socket error:", err);
+    socket.on("connect_error", () => {
       toast({
         title: "Connection Error",
-        description:
-          "Could not connect to the audio service. Make sure the service is running.",
+        description: "Could not connect to the audio relay service.",
         variant: "destructive",
       });
     });
 
     socket.on("host:created", (data) => {
       setSessionId(data.sessionId);
-      toast({
-        title: "Session Created!",
-        description: `Your session ID is ${data.sessionId}`,
-      });
+      toast({ title: "Session Created!", description: `Session ID: ${data.sessionId}` });
     });
 
     socket.on("session:updated", (data) => {
       setListeners(data.listeners || []);
       toast({
-        title: `${data.listeners?.length || 0} Listener(s) Connected`,
+        title: `${data.listeners?.length || 0} Listener(s)`,
         description: "Someone joined your stream!",
       });
     });
 
     socket.on("session:ended", () => {
-      toast({
-        title: "Session Ended",
-        description: "The streaming session has ended.",
-      });
+      toast({ title: "Session Ended", description: "The streaming session has ended." });
       resetState();
     });
 
-    socket.on("session:discovered", (sessions) => {
-      setDiscoveredSessions(sessions);
-    });
+    socket.on("session:discovered", (sessions) => setDiscoveredSessions(sessions));
 
     socket.on("audio:metadata", (data) => {
-      console.log("Received audio metadata:", data);
       startPlayback(data.sampleRate || AUDIO_SAMPLE_RATE);
     });
 
@@ -250,28 +254,62 @@ function AudioStreamDemo() {
       try {
         const float32 = new Float32Array(data.chunk);
         playbackQueueRef.current.push(float32);
-        if (!isPlayingRef.current) {
-          playNextChunkRef.current();
-        }
-      } catch (e) {
-        console.error("Error processing audio chunk:", e);
+        if (!isPlayingRef.current) playNextChunkRef.current();
+      } catch {
+        // ignore chunk errors
       }
     });
 
     socketRef.current = socket;
   }, [toast, resetState, startPlayback]);
 
-  // ─── Start mic capture and streaming (host) ───
+  // ─── Start streaming (host) ───
   const startStreaming = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const constraints: MediaStreamConstraints = {
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: audioSource === "mic",
+          noiseSuppression: audioSource === "mic",
+          autoGainControl: audioSource === "mic",
           sampleRate: AUDIO_SAMPLE_RATE,
         },
-      });
+      };
+
+      // Try to get system audio (getDisplayMedia) if source is "system"
+      let stream: MediaStream;
+      if (audioSource === "system") {
+        try {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true, // Required by some browsers
+            audio: true,
+          });
+          // If no audio track from display media, fall back to mic
+          if (stream.getAudioTracks().length === 0) {
+            stream.getVideoTracks().forEach((t) => t.stop());
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            toast({
+              title: "Using Microphone",
+              description: "System audio not available. Streaming from mic instead. On mobile apps, this captures any music playing.",
+            });
+          } else {
+            // Stop video track since we only need audio
+            stream.getVideoTracks().forEach((t) => t.stop());
+            toast({
+              title: "System Audio Captured",
+              description: "Streaming your system audio. Play music on YouTube, Spotify, or any app!",
+            });
+          }
+        } catch {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          toast({
+            title: "Using Microphone",
+            description: "System audio capture denied. Streaming from mic instead.",
+          });
+        }
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      }
+
       streamRef.current = stream;
 
       const audioContext = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
@@ -292,10 +330,7 @@ function AudioStreamDemo() {
         const inputData = e.inputBuffer.getChannelData(0);
         const chunk = inputData.buffer.slice(0);
 
-        socketRef.current?.emit("audio:chunk", {
-          chunk: chunk,
-          timestamp: Date.now(),
-        });
+        socketRef.current?.emit("audio:chunk", { chunk, timestamp: Date.now() });
 
         const sum = inputData.reduce((acc, val) => acc + val * val, 0);
         const rms = Math.sqrt(sum / inputData.length);
@@ -312,27 +347,20 @@ function AudioStreamDemo() {
       });
 
       setIsStreaming(true);
-      toast({
-        title: "Streaming Started",
-        description: "Your microphone is now live!",
-      });
+      toast({ title: "Streaming Started", description: "Your audio is now live!" });
     } catch {
       toast({
-        title: "Microphone Access Denied",
-        description: "Please allow microphone access to stream audio.",
+        title: "Audio Access Denied",
+        description: "Please allow audio access to stream.",
         variant: "destructive",
       });
     }
-  }, [toast]);
+  }, [toast, audioSource]);
 
-  // Host actions
+  // ─── Handlers ───
   const handleHostCreate = () => {
     if (!hostName.trim()) {
-      toast({
-        title: "Name Required",
-        description: "Please enter your name to host a session.",
-        variant: "destructive",
-      });
+      toast({ title: "Name Required", description: "Enter your name to host.", variant: "destructive" });
       return;
     }
     setRole("host");
@@ -342,44 +370,31 @@ function AudioStreamDemo() {
     }, 500);
   };
 
-  // Listener actions
   const handleDiscover = () => {
     connectSocket();
-    setTimeout(() => {
-      socketRef.current?.emit("session:discover");
-    }, 500);
+    setTimeout(() => socketRef.current?.emit("session:discover"), 500);
   };
 
   const handleJoin = (sid: string) => {
     if (!listenerName.trim()) {
-      toast({
-        title: "Name Required",
-        description: "Please enter your name to join a session.",
-        variant: "destructive",
-      });
+      toast({ title: "Name Required", description: "Enter your name to join.", variant: "destructive" });
       return;
     }
     setRole("listener");
     setJoinSessionId(sid);
     connectSocket();
     setTimeout(() => {
-      socketRef.current?.emit("session:join", {
-        sessionId: sid,
-        listenerName: listenerName.trim(),
-      });
+      socketRef.current?.emit("session:join", { sessionId: sid, listenerName: listenerName.trim() });
     }, 500);
   };
 
   // Audio level animation
   useEffect(() => {
     if (!isStreaming || !analyserRef.current) return;
-    const dataArray = new Uint8Array(
-      analyserRef.current.frequencyBinCount
-    );
+    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
     const animate = () => {
       analyserRef.current?.getByteFrequencyData(dataArray);
-      const avg =
-        dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+      const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
       setAudioLevel(Math.min((avg / 255) * 100, 100));
       requestAnimationFrame(animate);
     };
@@ -390,116 +405,104 @@ function AudioStreamDemo() {
   // Latency simulation
   useEffect(() => {
     if (role === "listener") {
-      const interval = setInterval(() => {
-        setLatency(Math.floor(Math.random() * 15 + 8));
-      }, 1000);
+      const interval = setInterval(() => setLatency(Math.floor(Math.random() * 15 + 8)), 1000);
       return () => clearInterval(interval);
     }
   }, [role]);
 
-  // ─── Render: No role selected ───
+  // ─── Render: No role ───
   if (role === "none") {
     return (
       <div className="space-y-8">
         <div className="text-center space-y-2">
           <h3 className="text-2xl font-bold">Try the Live Demo</h3>
           <p className="text-muted-foreground">
-            Host a session or join as a listener — all running on local
-            WebSocket relay.
+            One phone plays music — everyone else listens in their headphones.
           </p>
         </div>
 
         <div className="grid md:grid-cols-2 gap-6">
           {/* Host Card */}
-          <Card className="border-emerald-500/30 bg-gradient-to-br from-emerald-950/20 to-transparent hover:border-emerald-500/60 transition-all duration-300">
+          <Card className="border-orange-500/30 bg-gradient-to-br from-orange-950/20 to-transparent hover:border-orange-500/60 transition-all duration-300">
             <CardHeader>
-              <div className="w-12 h-12 rounded-xl bg-emerald-500/20 flex items-center justify-center mb-2">
-                <RadioTower className="w-6 h-6 text-emerald-400" />
+              <div className="w-12 h-12 rounded-xl bg-orange-500/20 flex items-center justify-center mb-2">
+                <Music className="w-6 h-6 text-orange-400" />
               </div>
-              <CardTitle className="text-xl">Host a Session</CardTitle>
+              <CardTitle className="text-xl">I&apos;m the Host</CardTitle>
               <CardDescription>
-                Start streaming your microphone to listeners on the same
-                network.
+                Play music on your phone (YouTube, Spotify, anything) and stream it to everyone.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <Input
-                placeholder="Your display name"
-                value={hostName}
-                onChange={(e) => setHostName(e.target.value)}
-                className="bg-background/50"
-              />
+              <Input placeholder="Your name" value={hostName} onChange={(e) => setHostName(e.target.value)} className="bg-background/50" />
+              <div className="flex gap-2">
+                <Button
+                  variant={audioSource === "system" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setAudioSource("system")}
+                  className={audioSource === "system" ? "bg-orange-600 text-white" : "border-orange-500/40 text-orange-400"}
+                >
+                  <Music className="w-3 h-3 mr-1" /> System Audio
+                </Button>
+                <Button
+                  variant={audioSource === "mic" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setAudioSource("mic")}
+                  className={audioSource === "mic" ? "bg-orange-600 text-white" : "border-orange-500/40 text-orange-400"}
+                >
+                  <Mic className="w-3 h-3 mr-1" /> Microphone
+                </Button>
+              </div>
+              {audioSource === "system" && (
+                <p className="text-xs text-muted-foreground">
+                  Captures audio from any app playing on your phone. In the browser demo, this uses screen capture.
+                </p>
+              )}
             </CardContent>
             <CardFooter>
-              <Button
-                onClick={handleHostCreate}
-                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
-              >
+              <Button onClick={handleHostCreate} className="w-full bg-orange-600 hover:bg-orange-700 text-white">
                 <Radio className="w-4 h-4 mr-2" />
-                Create Session
+                Start Broadcasting
               </Button>
             </CardFooter>
           </Card>
 
           {/* Listener Card */}
-          <Card className="border-cyan-500/30 bg-gradient-to-br from-cyan-950/20 to-transparent hover:border-cyan-500/60 transition-all duration-300">
+          <Card className="border-rose-500/30 bg-gradient-to-br from-rose-950/20 to-transparent hover:border-rose-500/60 transition-all duration-300">
             <CardHeader>
-              <div className="w-12 h-12 rounded-xl bg-cyan-500/20 flex items-center justify-center mb-2">
-                <Headphones className="w-6 h-6 text-cyan-400" />
+              <div className="w-12 h-12 rounded-xl bg-rose-500/20 flex items-center justify-center mb-2">
+                <Headphones className="w-6 h-6 text-rose-400" />
               </div>
-              <CardTitle className="text-xl">Join as Listener</CardTitle>
+              <CardTitle className="text-xl">I&apos;m a Listener</CardTitle>
               <CardDescription>
-                Discover active sessions and start listening in one tap.
+                Put on your headphones and listen to the host&apos;s music in real-time.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <Input
-                placeholder="Your display name"
-                value={listenerName}
-                onChange={(e) => setListenerName(e.target.value)}
-                className="bg-background/50"
-              />
-              <Button
-                onClick={handleDiscover}
-                variant="outline"
-                className="w-full border-cyan-500/40 text-cyan-400 hover:bg-cyan-500/10"
-              >
-                <Wifi className="w-4 h-4 mr-2" />
-                Discover Sessions
+              <Input placeholder="Your name" value={listenerName} onChange={(e) => setListenerName(e.target.value)} className="bg-background/50" />
+              <Button onClick={handleDiscover} variant="outline" className="w-full border-rose-500/40 text-rose-400 hover:bg-rose-500/10">
+                <Wifi className="w-4 h-4 mr-2" /> Find Sessions
               </Button>
               {discoveredSessions.length > 0 && (
-                <div className="space-y-2 mt-2">
+                <div className="space-y-2">
                   {discoveredSessions.map((s) => (
-                    <div
-                      key={s.sessionId}
-                      className="flex items-center justify-between p-3 rounded-lg bg-background/50 border border-border/50"
-                    >
+                    <div key={s.sessionId} className="flex items-center justify-between p-3 rounded-lg bg-background/50 border border-border/50">
                       <div>
-                        <p className="font-medium text-sm">
-                          {s.hostName}&apos;s Session
-                        </p>
+                        <p className="font-medium text-sm">{s.hostName}&apos;s Music</p>
                         <p className="text-xs text-muted-foreground">
-                          ID: {s.sessionId} · {s.listenerCount} listener
-                          {s.listenerCount !== 1 ? "s" : ""}
+                          {s.listenerCount} listener{ s.listenerCount !== 1 ? "s" : ""}
                         </p>
                       </div>
-                      <Button
-                        size="sm"
-                        onClick={() => handleJoin(s.sessionId)}
-                        className="bg-cyan-600 hover:bg-cyan-700 text-white"
-                      >
+                      <Button size="sm" onClick={() => handleJoin(s.sessionId)} className="bg-rose-600 hover:bg-rose-700 text-white">
                         Join
                       </Button>
                     </div>
                   ))}
                 </div>
               )}
-              {discoveredSessions.length === 0 &&
-                socketRef.current?.connected && (
-                  <p className="text-sm text-muted-foreground text-center">
-                    No active sessions found. Ask someone to host!
-                  </p>
-                )}
+              {discoveredSessions.length === 0 && socketConnected && (
+                <p className="text-sm text-muted-foreground text-center">No sessions found. Ask someone to host!</p>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -513,124 +516,65 @@ function AudioStreamDemo() {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
-              <RadioTower className="w-5 h-5 text-emerald-400" />
+            <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center">
+              <Music className="w-5 h-5 text-orange-400" />
             </div>
             <div>
-              <h3 className="text-lg font-bold">Hosting Session</h3>
+              <h3 className="text-lg font-bold">Now Broadcasting</h3>
               <p className="text-sm text-muted-foreground">
-                Session ID:{" "}
-                <span className="font-mono text-emerald-400">
-                  {sessionId || "Creating..."}
-                </span>
+                Session: <span className="font-mono text-orange-400">{sessionId || "Creating..."}</span>
               </p>
             </div>
           </div>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={() => {
-              socketRef.current?.emit("host:stop");
-              resetState();
-            }}
-          >
-            <Square className="w-4 h-4 mr-1" />
-            End Session
+          <Button variant="destructive" size="sm" onClick={() => { socketRef.current?.emit("host:stop"); resetState(); }}>
+            <Square className="w-4 h-4 mr-1" /> End
           </Button>
         </div>
 
-        {/* Audio Level Visualizer */}
-        <Card className="overflow-hidden">
+        <Card className="overflow-hidden border-orange-500/20">
           <CardContent className="p-6">
-            <div className="flex items-center gap-4 mb-4">
-              {isStreaming ? (
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setIsMuted(!isMuted)}
-                  className={
-                    isMuted
-                      ? "border-red-500/50 text-red-400"
-                      : "border-emerald-500/50 text-emerald-400"
-                  }
-                >
-                  {isMuted ? (
-                    <MicOff className="w-5 h-5" />
-                  ) : (
-                    <Mic className="w-5 h-5" />
-                  )}
-                </Button>
-              ) : null}
-              <div className="flex-1">
-                <div className="h-3 rounded-full bg-muted overflow-hidden">
-                  <motion.div
-                    className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-400"
-                    animate={{ width: `${audioLevel}%` }}
-                    transition={{ duration: 0.1 }}
-                  />
-                </div>
+            {/* Now Playing mock */}
+            <div className="flex items-center gap-4 mb-4 p-3 rounded-xl bg-muted/50 border border-border/50">
+              <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-orange-500 to-rose-500 flex items-center justify-center shrink-0">
+                {audioSource === "system" ? <Youtube className="w-6 h-6 text-white" /> : <Disc3 className="w-6 h-6 text-white" />}
               </div>
-              <Badge
-                variant={isStreaming ? "default" : "secondary"}
-                className={
-                  isStreaming
-                    ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
-                    : ""
-                }
-              >
-                {isStreaming
-                  ? isMuted
-                    ? "MUTED"
-                    : "LIVE"
-                  : "OFFLINE"}
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-sm truncate">
+                  {audioSource === "system" ? "System Audio (YouTube / Spotify / any app)" : "Microphone Input"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {audioSource === "system" ? "Play any music on your phone — everyone hears it" : "Your mic is live — everyone hears you"}
+                </p>
+              </div>
+              <Badge className="bg-orange-500/20 text-orange-400 border-orange-500/30 shrink-0">
+                {isStreaming ? (isMuted ? "MUTED" : "LIVE") : "OFFLINE"}
               </Badge>
             </div>
 
-            {/* Waveform Bars */}
-            <div className="flex items-center justify-center gap-[3px] h-20">
-              {Array.from({ length: 40 }).map((_, i) => {
-                const h = isStreaming
-                  ? Math.max(
-                      8,
-                      Math.sin(
-                        Date.now() / 200 + i * 0.5
-                      ) *
-                        30 *
-                        (audioLevel / 100) +
-                        10
-                    )
-                  : 8;
-                return (
-                  <motion.div
-                    key={i}
-                    className="w-1.5 rounded-full bg-gradient-to-t from-emerald-500 to-cyan-400"
-                    animate={{ height: h }}
-                    transition={{ duration: 0.1, ease: "easeOut" }}
-                  />
-                );
-              })}
+            <div className="flex items-center gap-4 mb-2">
+              {isStreaming && (
+                <Button variant="outline" size="icon" onClick={() => setIsMuted(!isMuted)}
+                  className={isMuted ? "border-red-500/50 text-red-400" : "border-orange-500/50 text-orange-400"}>
+                  {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                </Button>
+              )}
+              <div className="flex-1">
+                <div className="h-3 rounded-full bg-muted overflow-hidden">
+                  <motion.div className="h-full rounded-full bg-gradient-to-r from-orange-500 to-rose-500"
+                    animate={{ width: `${audioLevel}%` }} transition={{ duration: 0.1 }} />
+                </div>
+              </div>
             </div>
 
-            {!isStreaming && (
-              <Button
-                onClick={startStreaming}
-                className="w-full mt-4 bg-emerald-600 hover:bg-emerald-700 text-white"
-                size="lg"
-              >
-                <Mic className="w-5 h-5 mr-2" />
-                Start Streaming
-              </Button>
-            )}
+            <WaveformBars active={isStreaming && !isMuted} color1="from-orange-500" color2="to-rose-400" level={audioLevel} />
 
-            {isStreaming && (
-              <Button
-                onClick={stopStreaming}
-                variant="outline"
-                className="w-full mt-4 border-red-500/40 text-red-400 hover:bg-red-500/10"
-                size="lg"
-              >
-                <Square className="w-5 h-5 mr-2" />
-                Stop Streaming
+            {!isStreaming ? (
+              <Button onClick={startStreaming} className="w-full mt-4 bg-orange-600 hover:bg-orange-700 text-white" size="lg">
+                <Play className="w-5 h-5 mr-2" /> Start Broadcasting
+              </Button>
+            ) : (
+              <Button onClick={stopStreaming} variant="outline" className="w-full mt-4 border-red-500/40 text-red-400 hover:bg-red-500/10" size="lg">
+                <Square className="w-5 h-5 mr-2" /> Stop
               </Button>
             )}
           </CardContent>
@@ -640,30 +584,21 @@ function AudioStreamDemo() {
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-base flex items-center gap-2">
-                <Users className="w-4 h-4" />
-                Connected Listeners
-              </CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><Users className="w-4 h-4" /> Listening Now</CardTitle>
               <Badge variant="secondary">{listeners.length}</Badge>
             </div>
           </CardHeader>
           <CardContent>
             {listeners.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-4">
-                Waiting for listeners to join... Share your session ID:{" "}
-                <span className="font-mono text-emerald-400">
-                  {sessionId}
-                </span>
+                Waiting for listeners... Share session ID: <span className="font-mono text-orange-400">{sessionId}</span>
               </p>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-2 max-h-40 overflow-y-auto">
                 {listeners.map((l) => (
-                  <div
-                    key={l.id}
-                    className="flex items-center gap-3 p-2 rounded-lg bg-muted/50"
-                  >
-                    <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center">
-                      <Headphones className="w-4 h-4 text-cyan-400" />
+                  <div key={l.id} className="flex items-center gap-3 p-2 rounded-lg bg-muted/50">
+                    <div className="w-8 h-8 rounded-full bg-rose-500/20 flex items-center justify-center">
+                      <Headphones className="w-4 h-4 text-rose-400" />
                     </div>
                     <span className="text-sm font-medium">{l.name}</span>
                   </div>
@@ -681,122 +616,64 @@ function AudioStreamDemo() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
-            <Headphones className="w-5 h-5 text-cyan-400" />
+          <div className="w-10 h-10 rounded-xl bg-rose-500/20 flex items-center justify-center">
+            <Headphones className="w-5 h-5 text-rose-400" />
           </div>
           <div>
             <h3 className="text-lg font-bold">Listening</h3>
             <p className="text-sm text-muted-foreground">
-              Session:{" "}
-              <span className="font-mono text-cyan-400">
-                {joinSessionId}
-              </span>
+              Session: <span className="font-mono text-rose-400">{joinSessionId}</span>
             </p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={resetState}
-          className="border-red-500/40 text-red-400 hover:bg-red-500/10"
-        >
-          <Square className="w-4 h-4 mr-1" />
-          Leave
+        <Button variant="outline" size="sm" onClick={resetState} className="border-red-500/40 text-red-400 hover:bg-red-500/10">
+          <Square className="w-4 h-4 mr-1" /> Leave
         </Button>
       </div>
 
-      {/* Buffering */}
       {bufferProgress < 100 && bufferProgress > 0 && (
         <Card>
           <CardContent className="p-6">
             <div className="text-center space-y-3">
-              <AudioWaveform className="w-8 h-8 mx-auto text-cyan-400 animate-pulse" />
-              <p className="text-sm font-medium">Buffering audio...</p>
+              <AudioWaveform className="w-8 h-8 mx-auto text-rose-400 animate-pulse" />
+              <p className="text-sm font-medium">Buffering music...</p>
               <Progress value={bufferProgress} className="h-2" />
-              <p className="text-xs text-muted-foreground">
-                {bufferProgress}%
-              </p>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Playback Status */}
-      <Card className="border-cyan-500/30">
+      <Card className="border-rose-500/30">
         <CardContent className="p-6">
           <div className="flex items-center gap-4 mb-4">
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => setIsSpeakerOn(!isSpeakerOn)}
-              className={
-                isSpeakerOn
-                  ? "border-cyan-500/50 text-cyan-400"
-                  : "border-red-500/50 text-red-400"
-              }
-            >
-              {isSpeakerOn ? (
-                <Volume2 className="w-5 h-5" />
-              ) : (
-                <VolumeX className="w-5 h-5" />
-              )}
+            <Button variant="outline" size="icon" onClick={() => setIsSpeakerOn(!isSpeakerOn)}
+              className={isSpeakerOn ? "border-rose-500/50 text-rose-400" : "border-red-500/50 text-red-400"}>
+              {isSpeakerOn ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
             </Button>
             <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <div className="h-3 flex-1 rounded-full bg-muted overflow-hidden">
-                  <motion.div
-                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-emerald-400"
-                    animate={{
-                      width: bufferProgress >= 100 ? "100%" : `${bufferProgress}%`,
-                    }}
-                  />
-                </div>
+              <div className="h-3 rounded-full bg-muted overflow-hidden">
+                <motion.div className="h-full rounded-full bg-gradient-to-r from-rose-500 to-orange-400"
+                  animate={{ width: bufferProgress >= 100 ? "100%" : `${bufferProgress}%` }} />
               </div>
             </div>
-            <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30">
-              LIVE
-            </Badge>
+            <Badge className="bg-rose-500/20 text-rose-400 border-rose-500/30">LIVE</Badge>
           </div>
 
-          {/* Receiving Waveform */}
-          <div className="flex items-center justify-center gap-[3px] h-20">
-            {Array.from({ length: 40 }).map((_, i) => {
-              const h =
-                bufferProgress >= 100
-                  ? Math.max(
-                      8,
-                      Math.sin(Date.now() / 250 + i * 0.6) *
-                        25 +
-                        12
-                    )
-                  : 8;
-              return (
-                <motion.div
-                  key={i}
-                  className="w-1.5 rounded-full bg-gradient-to-t from-cyan-500 to-emerald-400"
-                  animate={{ height: h }}
-                  transition={{ duration: 0.15, ease: "easeOut" }}
-                />
-              );
-            })}
-          </div>
+          <WaveformBars active={bufferProgress >= 100} color1="from-rose-500" color2="to-orange-400" level={bufferProgress >= 100 ? 60 : 0} />
         </CardContent>
       </Card>
 
-      {/* Stats */}
       <div className="grid grid-cols-2 gap-4">
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-xs text-muted-foreground mb-1">Latency</p>
-            <p className="text-2xl font-bold text-cyan-400">~{latency}ms</p>
+            <p className="text-2xl font-bold text-rose-400">~{latency}ms</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-xs text-muted-foreground mb-1">Buffer</p>
-            <p className="text-2xl font-bold text-emerald-400">
-              {bufferProgress >= 100 ? "Full" : `${bufferProgress}%`}
-            </p>
+            <p className="text-2xl font-bold text-orange-400">{bufferProgress >= 100 ? "Full" : `${bufferProgress}%`}</p>
           </CardContent>
         </Card>
       </div>
@@ -807,31 +684,14 @@ function AudioStreamDemo() {
 // ──────────────────────────────────────────────
 // Code Block with Copy
 // ──────────────────────────────────────────────
-function CodeBlock({ code, language = "bash" }: { code: string; language?: string }) {
+function CodeBlock({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
   return (
     <div className="relative group">
-      <pre className="bg-zinc-900 text-zinc-100 p-4 rounded-lg overflow-x-auto text-sm font-mono">
-        <code>{code}</code>
-      </pre>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={handleCopy}
-        className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
-      >
-        {copied ? (
-          <Check className="w-4 h-4 text-emerald-400" />
-        ) : (
-          <Copy className="w-4 h-4" />
-        )}
+      <pre className="bg-zinc-900 text-zinc-100 p-4 rounded-lg overflow-x-auto text-sm font-mono"><code>{code}</code></pre>
+      <Button variant="ghost" size="icon" onClick={() => { navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+        className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+        {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
       </Button>
     </div>
   );
@@ -841,12 +701,7 @@ function CodeBlock({ code, language = "bash" }: { code: string; language?: strin
 // Main Page
 // ──────────────────────────────────────────────
 export default function HomePage() {
-  const [activeSection, setActiveSection] = useState("hero");
-
-  // Smooth scroll
-  const scrollTo = (id: string) => {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
-  };
+  const scrollTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
 
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground">
@@ -854,41 +709,18 @@ export default function HomePage() {
       <header className="sticky top-0 z-50 backdrop-blur-xl bg-background/80 border-b border-border/50">
         <nav className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-400 flex items-center justify-center">
-              <Radio className="w-4 h-4 text-white" />
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-orange-500 to-rose-500 flex items-center justify-center">
+              <Headphones className="w-4 h-4 text-white" />
             </div>
-            <span className="font-bold text-lg">LocalCast</span>
+            <span className="font-bold text-lg">GroupHear</span>
           </div>
           <div className="hidden md:flex items-center gap-6 text-sm">
-            <button
-              onClick={() => scrollTo("features")}
-              className="hover:text-emerald-400 transition-colors"
-            >
-              Features
-            </button>
-            <button
-              onClick={() => scrollTo("architecture")}
-              className="hover:text-emerald-400 transition-colors"
-            >
-              Architecture
-            </button>
-            <button
-              onClick={() => scrollTo("demo")}
-              className="hover:text-emerald-400 transition-colors"
-            >
-              Live Demo
-            </button>
-            <button
-              onClick={() => scrollTo("publish")}
-              className="hover:text-emerald-400 transition-colors"
-            >
-              Publish Guide
-            </button>
+            <button onClick={() => scrollTo("how")} className="hover:text-orange-400 transition-colors">How It Works</button>
+            <button onClick={() => scrollTo("features")} className="hover:text-orange-400 transition-colors">Features</button>
+            <button onClick={() => scrollTo("demo")} className="hover:text-orange-400 transition-colors">Live Demo</button>
+            <button onClick={() => scrollTo("build")} className="hover:text-orange-400 transition-colors">Build &amp; Publish</button>
           </div>
-          <Button
-            onClick={() => scrollTo("demo")}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white"
-          >
+          <Button onClick={() => scrollTo("demo")} className="bg-orange-600 hover:bg-orange-700 text-white">
             Try Demo
           </Button>
         </nav>
@@ -896,93 +728,54 @@ export default function HomePage() {
 
       <main className="flex-1">
         {/* ─── HERO ─── */}
-        <section
-          id="hero"
-          className="relative overflow-hidden py-20 md:py-32"
-        >
-          {/* Background glow */}
+        <section id="hero" className="relative overflow-hidden py-20 md:py-32">
           <div className="absolute inset-0 pointer-events-none">
-            <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl" />
-            <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl" />
+            <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-orange-500/10 rounded-full blur-3xl" />
+            <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-rose-500/10 rounded-full blur-3xl" />
           </div>
 
           <div className="max-w-6xl mx-auto px-4 relative z-10">
             <div className="grid md:grid-cols-2 gap-12 items-center">
-              <motion.div
-                initial={{ opacity: 0, x: -30 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.6 }}
-                className="space-y-6"
-              >
-                <Badge
-                  variant="outline"
-                  className="border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
-                >
-                  <Wifi className="w-3 h-3 mr-1" />
-                  No Internet Required
+              <motion.div initial={{ opacity: 0, x: -30 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.6 }} className="space-y-6">
+                <Badge variant="outline" className="border-orange-500/40 text-orange-400 bg-orange-500/10">
+                  <Wifi className="w-3 h-3 mr-1" /> No Internet Needed
                 </Badge>
                 <h1 className="text-4xl md:text-6xl font-bold leading-tight">
-                  Stream Audio
+                  One Phone Plays.
                   <br />
-                  <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                    Over Local Wi-Fi
+                  <span className="bg-gradient-to-r from-orange-400 to-rose-400 bg-clip-text text-transparent">
+                    Everyone Listens.
                   </span>
                 </h1>
                 <p className="text-lg text-muted-foreground leading-relaxed">
-                  One host. Unlimited listeners. Zero cloud. LocalCast lets you
-                  stream live audio to any phone on the same Wi-Fi network — no
-                  sign-up, no data, no internet needed.
+                  Play music from YouTube, Spotify, or any app on your phone — and everyone
+                  on the same Wi-Fi hears it through their own headphones. No login.
+                  No cloud. Just connect and listen.
                 </p>
                 <div className="flex flex-wrap gap-3">
-                  <Button
-                    size="lg"
-                    onClick={() => scrollTo("demo")}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                  >
-                    <Play className="w-5 h-5 mr-2" />
-                    Try Live Demo
+                  <Button size="lg" onClick={() => scrollTo("demo")} className="bg-orange-600 hover:bg-orange-700 text-white">
+                    <Play className="w-5 h-5 mr-2" /> Try Live Demo
                   </Button>
-                  <Button
-                    size="lg"
-                    variant="outline"
-                    onClick={() => scrollTo("architecture")}
-                    className="border-emerald-500/40"
-                  >
-                    View Architecture
-                    <ChevronRight className="w-4 h-4 ml-1" />
+                  <Button size="lg" variant="outline" onClick={() => scrollTo("build")} className="border-orange-500/40">
+                    Build &amp; Publish <ChevronRight className="w-4 h-4 ml-1" />
                   </Button>
                 </div>
               </motion.div>
 
-              <motion.div
-                initial={{ opacity: 0, x: 30 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.6, delay: 0.2 }}
-                className="relative"
-              >
-                <div className="relative rounded-2xl overflow-hidden border border-border/50 shadow-2xl shadow-emerald-500/10">
-                  <img
-                    src="/hero-audio.png"
-                    alt="LocalCast audio streaming visualization"
-                    className="w-full h-auto"
-                  />
+              <motion.div initial={{ opacity: 0, x: 30 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.6, delay: 0.2 }} className="relative">
+                <div className="relative rounded-2xl overflow-hidden border border-border/50 shadow-2xl shadow-orange-500/10">
+                  <img src="/hero-music.png" alt="Group music listening over Wi-Fi" className="w-full h-auto" />
                   <div className="absolute inset-0 bg-gradient-to-t from-background/80 to-transparent" />
                   <div className="absolute bottom-4 left-4 right-4">
                     <div className="flex items-center gap-3 bg-background/90 backdrop-blur-sm p-3 rounded-xl border border-border/50">
-                      <div className="w-10 h-10 rounded-lg bg-emerald-500/20 flex items-center justify-center">
-                        <RadioTower className="w-5 h-5 text-emerald-400" />
+                      <div className="w-10 h-10 rounded-lg bg-orange-500/20 flex items-center justify-center">
+                        <Music className="w-5 h-5 text-orange-400" />
                       </div>
                       <div>
-                        <p className="text-sm font-medium">
-                          Live Session Active
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          24 listeners · ~12ms latency
-                        </p>
+                        <p className="text-sm font-medium">Now Playing — Shared Session</p>
+                        <p className="text-xs text-muted-foreground">24 listeners · ~12ms latency</p>
                       </div>
-                      <Badge className="ml-auto bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
-                        LIVE
-                      </Badge>
+                      <Badge className="ml-auto bg-orange-500/20 text-orange-400 border-orange-500/30">LIVE</Badge>
                     </div>
                   </div>
                 </div>
@@ -991,473 +784,97 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ─── STATS BAR ─── */}
-        <section className="border-y border-border/50 bg-muted/30 py-8">
-          <div className="max-w-6xl mx-auto px-4 grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
-            {[
-              { value: "0ms", label: "Cloud Latency", icon: Zap },
-              { value: "∞", label: "Max Listeners", icon: Users },
-              { value: "0", label: "Accounts Needed", icon: Shield },
-              { value: "100%", label: "Offline Capable", icon: Globe },
-            ].map((stat, i) => (
-              <motion.div
-                key={i}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.1 }}
-                className="space-y-2"
-              >
-                <stat.icon className="w-5 h-5 mx-auto text-emerald-400" />
-                <p className="text-2xl font-bold">{stat.value}</p>
-                <p className="text-sm text-muted-foreground">
-                  {stat.label}
-                </p>
-              </motion.div>
-            ))}
-          </div>
-        </section>
-
-        {/* ─── FEATURES ─── */}
-        <section id="features" className="py-20 md:py-28">
+        {/* ─── HOW IT WORKS ─── */}
+        <section id="how" className="py-20 md:py-28 border-y border-border/50 bg-muted/30">
           <div className="max-w-6xl mx-auto px-4">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="text-center space-y-4 mb-16"
-            >
-              <Badge
-                variant="outline"
-                className="border-cyan-500/40 text-cyan-400 bg-cyan-500/10"
-              >
-                Core Features
-              </Badge>
+            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} className="text-center space-y-4 mb-16">
+              <Badge variant="outline" className="border-rose-500/40 text-rose-400 bg-rose-500/10">3 Simple Steps</Badge>
               <h2 className="text-3xl md:text-4xl font-bold">
-                Everything You Need,{" "}
-                <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                  Nothing You Don&apos;t
-                </span>
+                How It{" "}
+                <span className="bg-gradient-to-r from-orange-400 to-rose-400 bg-clip-text text-transparent">Works</span>
               </h2>
-              <p className="text-muted-foreground max-w-2xl mx-auto">
-                Built for simplicity and performance. No bloat, no accounts,
-                no cloud dependency.
-              </p>
             </motion.div>
 
-            <div className="grid md:grid-cols-3 gap-6">
+            <div className="grid md:grid-cols-3 gap-8">
               {[
                 {
+                  step: "1",
                   icon: RadioTower,
-                  title: "Host Streaming",
-                  description:
-                    "Start streaming your microphone or media audio with one tap. UDP multicast ensures efficient delivery to all listeners simultaneously.",
-                  color: "emerald",
+                  title: "Host Starts Playing",
+                  description: "Open YouTube, Spotify, Apple Music, or any app. Hit play. GroupHear captures the system audio and streams it over Wi-Fi via UDP multicast.",
+                  color: "orange",
                 },
                 {
+                  step: "2",
                   icon: Wifi,
-                  title: "Auto Discovery",
-                  description:
-                    "Clients automatically discover the host via UDP broadcast. No IP addresses to share, no QR codes to scan.",
-                  color: "cyan",
+                  title: "Listeners Auto-Discover",
+                  description: "Anyone on the same Wi-Fi (router or phone hotspot) sees the session automatically. No IP addresses, no pairing codes — just tap Join.",
+                  color: "rose",
                 },
                 {
+                  step: "3",
                   icon: Headphones,
-                  title: "Synced Playback",
-                  description:
-                    "Buffered, synchronized playback across all devices. Adaptive jitter buffer keeps audio smooth even on crowded networks.",
-                  color: "emerald",
+                  title: "Everyone Hears Together",
+                  description: "All listeners hear the same music through their own headphones, synced within milliseconds. Works for 10-30+ devices on a phone hotspot.",
+                  color: "orange",
                 },
-                {
-                  icon: Smartphone,
-                  title: "Cross-Platform",
-                  description:
-                    "Works on both iOS and Android. Built with Flutter for native performance on both platforms from a single codebase.",
-                  color: "cyan",
-                },
-                {
-                  icon: Zap,
-                  title: "Ultra-Low Latency",
-                  description:
-                    "Sub-50ms latency on local Wi-Fi. Direct UDP multicast means no server round-trips, no cloud relay delays.",
-                  color: "emerald",
-                },
-                {
-                  icon: Shield,
-                  title: "Completely Private",
-                  description:
-                    "No data leaves your local network. No analytics, no tracking, no cloud servers. Your audio stays on your Wi-Fi.",
-                  color: "cyan",
-                },
-              ].map((feature, i) => (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.08 }}
-                >
-                  <Card className="h-full hover:border-emerald-500/40 transition-all duration-300 group">
+              ].map((item, i) => (
+                <motion.div key={i} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.15 }}>
+                  <Card className="h-full text-center hover:border-orange-500/40 transition-all duration-300">
                     <CardHeader>
-                      <div
-                        className={`w-12 h-12 rounded-xl ${
-                          feature.color === "emerald"
-                            ? "bg-emerald-500/20"
-                            : "bg-cyan-500/20"
-                        } flex items-center justify-center mb-2 group-hover:scale-110 transition-transform`}
-                      >
-                        <feature.icon
-                          className={`w-6 h-6 ${
-                            feature.color === "emerald"
-                              ? "text-emerald-400"
-                              : "text-cyan-400"
-                          }`}
-                        />
+                      <div className="mx-auto mb-2">
+                        <div className={`w-16 h-16 rounded-2xl ${item.color === "orange" ? "bg-orange-500/20" : "bg-rose-500/20"} flex items-center justify-center`}>
+                          <item.icon className={`w-8 h-8 ${item.color === "orange" ? "text-orange-400" : "text-rose-400"}`} />
+                        </div>
                       </div>
-                      <CardTitle className="text-lg">
-                        {feature.title}
-                      </CardTitle>
+                      <Badge variant="secondary" className="w-fit mx-auto">Step {item.step}</Badge>
+                      <CardTitle className="text-lg mt-2">{item.title}</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <p className="text-sm text-muted-foreground">
-                        {feature.description}
-                      </p>
+                      <p className="text-sm text-muted-foreground">{item.description}</p>
                     </CardContent>
                   </Card>
                 </motion.div>
               ))}
             </div>
-          </div>
-        </section>
 
-        {/* ─── ARCHITECTURE ─── */}
-        <section
-          id="architecture"
-          className="py-20 md:py-28 bg-muted/30 border-y border-border/50"
-        >
-          <div className="max-w-6xl mx-auto px-4">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="text-center space-y-4 mb-16"
-            >
-              <Badge
-                variant="outline"
-                className="border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
-              >
-                Technical Architecture
-              </Badge>
-              <h2 className="text-3xl md:text-4xl font-bold">
-                How It{" "}
-                <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                  Works Under the Hood
-                </span>
-              </h2>
-              <p className="text-muted-foreground max-w-2xl mx-auto">
-                A deep dive into the UDP multicast streaming and UDP broadcast
-                discovery protocol.
-              </p>
-            </motion.div>
-
-            {/* Architecture Diagram */}
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              whileInView={{ opacity: 1, scale: 1 }}
-              className="mb-16"
-            >
+            {/* Visual diagram */}
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} whileInView={{ opacity: 1, scale: 1 }} className="mt-16">
               <Card className="overflow-hidden">
-                <div className="relative">
-                  <img
-                    src="/network-topology.png"
-                    alt="Network topology diagram"
-                    className="w-full h-auto opacity-60"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-b from-background/50 to-background" />
-                </div>
-                <CardContent className="p-8 -mt-32 relative z-10">
-                  {/* Topology Visual */}
+                <CardContent className="p-8">
                   <div className="flex flex-col items-center gap-6">
-                    {/* Host */}
-                    <div className="flex items-center gap-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 px-6">
-                      <RadioTower className="w-6 h-6 text-emerald-400" />
+                    {/* Host phone */}
+                    <div className="flex items-center gap-4 bg-orange-500/10 border border-orange-500/30 rounded-xl p-4 px-6">
+                      <div className="w-10 h-14 rounded-lg bg-gradient-to-br from-orange-500 to-rose-500 flex items-center justify-center">
+                        <Youtube className="w-5 h-5 text-white" />
+                      </div>
                       <div>
-                        <p className="font-bold text-emerald-400">
-                          Host Device
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          Captures mic → Encodes PCM → Sends via UDP Multicast
-                        </p>
+                        <p className="font-bold text-orange-400">Host Phone</p>
+                        <p className="text-xs text-muted-foreground">Plays YouTube / Spotify / any music app</p>
                       </div>
                     </div>
 
-                    {/* Arrow */}
                     <div className="flex flex-col items-center gap-1">
-                      <div className="w-px h-6 bg-gradient-to-b from-emerald-400 to-cyan-400" />
-                      <Badge
-                        variant="outline"
-                        className="border-cyan-500/40 text-cyan-400 text-xs"
-                      >
+                      <div className="w-px h-6 bg-gradient-to-b from-orange-400 to-rose-400" />
+                      <Badge variant="outline" className="border-orange-500/40 text-orange-400 text-xs">
                         UDP Multicast (239.255.x.x:4010)
                       </Badge>
-                      <div className="w-px h-6 bg-cyan-400" />
+                      <div className="w-px h-6 bg-rose-400" />
                     </div>
 
-                    {/* Router */}
+                    {/* Router / Hotspot */}
                     <div className="flex items-center gap-3 bg-muted/80 border border-border rounded-xl p-3 px-5">
                       <Wifi className="w-5 h-5 text-muted-foreground" />
-                      <span className="font-medium text-sm">
-                        Wi-Fi Router / Hotspot
-                      </span>
+                      <span className="font-medium text-sm">Wi-Fi Router / Phone Hotspot</span>
                     </div>
 
-                    {/* Arrows to clients */}
-                    <div className="w-px h-6 bg-cyan-400" />
+                    <div className="w-px h-6 bg-rose-400" />
 
-                    {/* Clients */}
+                    {/* Listener phones */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      {["Client 1", "Client 2", "Client 3", "Client N"].map(
-                        (name, i) => (
-                          <div
-                            key={i}
-                            className="flex items-center gap-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg p-2 px-3"
-                          >
-                            <Headphones className="w-4 h-4 text-cyan-400" />
-                            <span className="text-xs font-medium text-cyan-400">
-                              {name}
-                            </span>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </motion.div>
-
-            {/* Protocol Details */}
-            <div className="grid md:grid-cols-2 gap-8">
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                whileInView={{ opacity: 1, x: 0 }}
-              >
-                <Card className="h-full border-emerald-500/20">
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <RadioTower className="w-5 h-5 text-emerald-400" />
-                      Streaming Protocol
-                    </CardTitle>
-                    <CardDescription>
-                      UDP Multicast (RFC 1112)
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4 text-sm">
-                    <div className="space-y-3">
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          1
-                        </Badge>
-                        <p>
-                          <strong>Capture:</strong> Host captures PCM audio
-                          from microphone at 48kHz/16-bit via platform-native
-                          APIs (Android AudioRecord / iOS AVAudioEngine).
-                        </p>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          2
-                        </Badge>
-                        <p>
-                          <strong>Encode:</strong> Audio is encoded as Opus
-                          (64kbps) for bandwidth efficiency — ~8KB/s per
-                          stream, well within Wi-Fi capacity.
-                        </p>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          3
-                        </Badge>
-                        <p>
-                          <strong>Multicast:</strong> Packets are sent to
-                          multicast group <code className="text-emerald-400 bg-muted px-1 rounded text-xs">239.255.0.1:4010</code>.
-                          All subscribed clients receive the same packets
-                          simultaneously.
-                        </p>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          4
-                        </Badge>
-                        <p>
-                          <strong>Decode & Play:</strong> Clients decode Opus
-                          → PCM, feed into an adaptive jitter buffer (50-200ms),
-                          then play through headphones via platform audio APIs.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="bg-muted/50 rounded-lg p-3">
-                      <p className="text-xs text-muted-foreground">
-                        <strong>Why Multicast?</strong> One packet from the host
-                        reaches ALL clients. No per-client copies. Scales from
-                        1 to 1000+ listeners without increasing host bandwidth.
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              </motion.div>
-
-              <motion.div
-                initial={{ opacity: 0, x: 20 }}
-                whileInView={{ opacity: 1, x: 0 }}
-              >
-                <Card className="h-full border-cyan-500/20">
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Wifi className="w-5 h-5 text-cyan-400" />
-                      Discovery Protocol
-                    </CardTitle>
-                    <CardDescription>
-                      UDP Broadcast (255.255.255.255:4020)
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4 text-sm">
-                    <div className="space-y-3">
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          1
-                        </Badge>
-                        <p>
-                          <strong>Host Announces:</strong> Every 2 seconds, the
-                          host broadcasts a JSON beacon:{" "}
-                          <code className="text-cyan-400 bg-muted px-1 rounded text-xs">
-                            {"{hostId, name, listeners, port}"}
-                          </code>
-                        </p>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          2
-                        </Badge>
-                        <p>
-                          <strong>Client Listens:</strong> On app launch,
-                          clients listen on the broadcast port for 5 seconds to
-                          collect all available sessions.
-                        </p>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          3
-                        </Badge>
-                        <p>
-                          <strong>One-Tap Join:</strong> User selects a session
-                          → app subscribes to the multicast group and starts
-                          receiving audio immediately.
-                        </p>
-                      </div>
-                      <div className="flex items-start gap-2">
-                        <Badge
-                          variant="secondary"
-                          className="mt-0.5 text-xs shrink-0"
-                        >
-                          4
-                        </Badge>
-                        <p>
-                          <strong>Leave Notification:</strong> Client sends a
-                          UDP unicast leave message to the host, which updates
-                          the listener count in subsequent beacons.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="bg-muted/50 rounded-lg p-3">
-                      <p className="text-xs text-muted-foreground">
-                        <strong>Why Broadcast?</strong> Works on any Wi-Fi
-                        without configuration. No mDNS dependency, no SSDP
-                        complexity. Just send → receive → join.
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            </div>
-
-            {/* Packet Format */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="mt-12"
-            >
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">
-                    Audio Packet Format
-                  </CardTitle>
-                  <CardDescription>
-                    Each UDP datagram carries one audio frame
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="overflow-x-auto">
-                    <div className="min-w-[600px] flex items-stretch gap-px rounded-lg overflow-hidden">
-                      {[
-                        {
-                          label: "Magic",
-                          bytes: "2B",
-                          desc: "0xAC",
-                          color: "bg-emerald-500/30",
-                        },
-                        {
-                          label: "Seq",
-                          bytes: "4B",
-                          desc: "Sequence #",
-                          color: "bg-emerald-500/20",
-                        },
-                        {
-                          label: "TS",
-                          bytes: "4B",
-                          desc: "Timestamp",
-                          color: "bg-cyan-500/20",
-                        },
-                        {
-                          label: "Codec",
-                          bytes: "1B",
-                          desc: "0=PCM, 1=Opus",
-                          color: "bg-cyan-500/30",
-                        },
-                        {
-                          label: "Payload",
-                          bytes: "≤1400B",
-                          desc: "Audio data",
-                          color: "bg-emerald-500/10",
-                        },
-                      ].map((field, i) => (
-                        <div
-                          key={i}
-                          className={`flex-1 ${field.color} p-3 text-center`}
-                        >
-                          <p className="text-xs font-bold">{field.label}</p>
-                          <p className="text-[10px] text-muted-foreground">
-                            {field.bytes}
-                          </p>
-                          <p className="text-[10px] mt-1 opacity-70">
-                            {field.desc}
-                          </p>
+                      {["🎧 Phone 1", "🎧 Phone 2", "🎧 Phone 3", "🎧 Phone N"].map((name, i) => (
+                        <div key={i} className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/30 rounded-lg p-2 px-3">
+                          <span className="text-xs font-medium text-rose-400">{name}</span>
                         </div>
                       ))}
                     </div>
@@ -1468,58 +885,96 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ─── LIVE DEMO ─── */}
-        <section id="demo" className="py-20 md:py-28">
-          <div className="max-w-4xl mx-auto px-4">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="text-center space-y-4 mb-12"
-            >
-              <Badge
-                variant="outline"
-                className="border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
-              >
-                <Play className="w-3 h-3 mr-1" />
-                Interactive Demo
-              </Badge>
+        {/* ─── STATS ─── */}
+        <section className="py-8 border-b border-border/50">
+          <div className="max-w-6xl mx-auto px-4 grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
+            {[
+              { value: "0ms", label: "Cloud Latency", icon: Zap },
+              { value: "30+", label: "Devices on Hotspot", icon: Users },
+              { value: "0", label: "Accounts Needed", icon: Shield },
+              { value: "100%", label: "Offline Capable", icon: Globe },
+            ].map((stat, i) => (
+              <motion.div key={i} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.1 }} className="space-y-2">
+                <stat.icon className="w-5 h-5 mx-auto text-orange-400" />
+                <p className="text-2xl font-bold">{stat.value}</p>
+                <p className="text-sm text-muted-foreground">{stat.label}</p>
+              </motion.div>
+            ))}
+          </div>
+        </section>
+
+        {/* ─── FEATURES ─── */}
+        <section id="features" className="py-20 md:py-28">
+          <div className="max-w-6xl mx-auto px-4">
+            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} className="text-center space-y-4 mb-16">
+              <Badge variant="outline" className="border-orange-500/40 text-orange-400 bg-orange-500/10">Features</Badge>
               <h2 className="text-3xl md:text-4xl font-bold">
-                Try It{" "}
-                <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                  Right Now
-                </span>
+                Play From{" "}
+                <span className="bg-gradient-to-r from-orange-400 to-rose-400 bg-clip-text text-transparent">Any App</span>
               </h2>
               <p className="text-muted-foreground max-w-2xl mx-auto">
-                This web demo uses WebSocket relay instead of UDP multicast
-                (browsers can&apos;t do raw UDP), but the UX is identical to
-                the native app.
+                YouTube, Spotify, Apple Music, SoundCloud, local files — anything playing on the host phone gets streamed to everyone.
               </p>
             </motion.div>
 
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-            >
+            <div className="grid md:grid-cols-3 gap-6">
+              {[
+                { icon: Youtube, title: "YouTube Support", description: "Play any YouTube video and the audio streams live to all connected listeners. Works with YouTube Music too.", color: "orange" },
+                { icon: Music, title: "Any Music App", description: "Spotify, Apple Music, SoundCloud, Tidal, local MP3s — if it plays audio on your phone, GroupHear streams it.", color: "rose" },
+                { icon: Wifi, title: "Auto Discovery", description: "No pairing codes. Listeners on the same Wi-Fi automatically see your session. One tap to join.", color: "orange" },
+                { icon: Headphones, title: "Synced Headphones", description: "Each listener uses their own headphones. Adaptive jitter buffer keeps everyone in sync within milliseconds.", color: "rose" },
+                { icon: Smartphone, title: "Phone Hotspot", description: "No router? Use the host phone's hotspot. All listeners connect to it. Works for 10-30+ devices.", color: "orange" },
+                { icon: Shield, title: "100% Private", description: "Zero data leaves your local network. No accounts, no tracking, no cloud. Your music stays on your Wi-Fi.", color: "rose" },
+              ].map((feature, i) => (
+                <motion.div key={i} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.08 }}>
+                  <Card className="h-full hover:border-orange-500/40 transition-all duration-300 group">
+                    <CardHeader>
+                      <div className={`w-12 h-12 rounded-xl ${feature.color === "orange" ? "bg-orange-500/20" : "bg-rose-500/20"} flex items-center justify-center mb-2 group-hover:scale-110 transition-transform`}>
+                        <feature.icon className={`w-6 h-6 ${feature.color === "orange" ? "text-orange-400" : "text-rose-400"}`} />
+                      </div>
+                      <CardTitle className="text-lg">{feature.title}</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-sm text-muted-foreground">{feature.description}</p>
+                    </CardContent>
+                  </Card>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ─── LIVE DEMO ─── */}
+        <section id="demo" className="py-20 md:py-28 bg-muted/30 border-y border-border/50">
+          <div className="max-w-4xl mx-auto px-4">
+            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} className="text-center space-y-4 mb-12">
+              <Badge variant="outline" className="border-orange-500/40 text-orange-400 bg-orange-500/10">
+                <Play className="w-3 h-3 mr-1" /> Interactive Demo
+              </Badge>
+              <h2 className="text-3xl md:text-4xl font-bold">
+                Try It{" "}
+                <span className="bg-gradient-to-r from-orange-400 to-rose-400 bg-clip-text text-transparent">Right Now</span>
+              </h2>
+              <p className="text-muted-foreground max-w-2xl mx-auto">
+                This web demo uses your browser&apos;s audio APIs. Open two tabs — host in one, listen in the other.
+              </p>
+            </motion.div>
+
+            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }}>
               <AudioStreamDemo />
             </motion.div>
 
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="mt-8"
-            >
+            <motion.div initial={{ opacity: 0 }} whileInView={{ opacity: 1 }} className="mt-8">
               <Card className="border-yellow-500/30 bg-yellow-500/5">
                 <CardContent className="p-4 flex items-start gap-3">
                   <MonitorSmartphone className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
                   <div className="text-sm">
-                    <p className="font-medium text-yellow-400 mb-1">
-                      Web Demo Limitations
-                    </p>
+                    <p className="font-medium text-yellow-400 mb-1">Browser vs Native App</p>
                     <p className="text-muted-foreground">
-                      Browsers cannot access raw UDP sockets, so this demo uses
-                      a WebSocket relay server. The native mobile app uses
-                      direct UDP multicast for true zero-server, sub-10ms
-                      latency streaming.
+                      Browsers can&apos;t capture system audio from other apps. This demo uses mic or screen capture instead.
+                      The <strong>native mobile app</strong> uses Android&apos;s <code className="bg-muted px-1 rounded text-xs">MediaProjection</code> API
+                      and iOS <code className="bg-muted px-1 rounded text-xs">AVAudioEngine</code> to capture audio from <em>any</em> playing app
+                      (YouTube, Spotify, etc.) — that&apos;s the real magic.
                     </p>
                   </div>
                 </CardContent>
@@ -1528,119 +983,187 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ─── PUBLISH GUIDE ─── */}
-        <section
-          id="publish"
-          className="py-20 md:py-28 bg-muted/30 border-y border-border/50"
-        >
+        {/* ─── BUILD & PUBLISH GUIDE ─── */}
+        <section id="build" className="py-20 md:py-28">
           <div className="max-w-6xl mx-auto px-4">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="text-center space-y-4 mb-16"
-            >
-              <Badge
-                variant="outline"
-                className="border-cyan-500/40 text-cyan-400 bg-cyan-500/10"
-              >
-                <Package className="w-3 h-3 mr-1" />
-                Publishing Guide
+            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} className="text-center space-y-4 mb-16">
+              <Badge variant="outline" className="border-rose-500/40 text-rose-400 bg-rose-500/10">
+                <Package className="w-3 h-3 mr-1" /> Build &amp; Publish
               </Badge>
               <h2 className="text-3xl md:text-4xl font-bold">
-                From Code to{" "}
-                <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                  App Store & Website
-                </span>
+                Ship Your{" "}
+                <span className="bg-gradient-to-r from-orange-400 to-rose-400 bg-clip-text text-transparent">App &amp; Website</span>
               </h2>
               <p className="text-muted-foreground max-w-2xl mx-auto">
-                Complete step-by-step guide to build, sign, and publish your
-                app and landing page.
+                Complete code and step-by-step guides to build the native app and publish it to both app stores.
               </p>
             </motion.div>
 
             <Tabs defaultValue="flutter" className="space-y-8">
               <TabsList className="grid w-full grid-cols-4 max-w-2xl mx-auto">
-                <TabsTrigger value="flutter">
-                  <Smartphone className="w-4 h-4 mr-2" />
-                  Flutter App
-                </TabsTrigger>
-                <TabsTrigger value="android">
-                  <Terminal className="w-4 h-4 mr-2" />
-                  Android
-                </TabsTrigger>
-                <TabsTrigger value="ios">
-                  <Package className="w-4 h-4 mr-2" />
-                  iOS
-                </TabsTrigger>
-                <TabsTrigger value="website">
-                  <Globe className="w-4 h-4 mr-2" />
-                  Website
-                </TabsTrigger>
+                <TabsTrigger value="flutter"><Smartphone className="w-4 h-4 mr-2" /> Flutter</TabsTrigger>
+                <TabsTrigger value="android"><Terminal className="w-4 h-4 mr-2" /> Android</TabsTrigger>
+                <TabsTrigger value="ios"><Package className="w-4 h-4 mr-2" /> iOS</TabsTrigger>
+                <TabsTrigger value="website"><Globe className="w-4 h-4 mr-2" /> Website</TabsTrigger>
               </TabsList>
 
-              {/* Flutter App Tab */}
+              {/* Flutter Tab */}
               <TabsContent value="flutter" className="space-y-6">
                 <Card>
                   <CardHeader>
-                    <CardTitle>Project Setup</CardTitle>
-                    <CardDescription>
-                      Create and configure the Flutter project
-                    </CardDescription>
+                    <CardTitle>Project Setup &amp; System Audio Capture</CardTitle>
+                    <CardDescription>Capture audio from YouTube, Spotify, or any playing app</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <CodeBlock
-                      code={`# 1. Create Flutter project
-flutter create localcast --org com.localcast --platforms android,ios
-cd localcast
+                    <CodeBlock code={`# 1. Create Flutter project
+flutter create grouphhear --org com.grouphhear --platforms android,ios
+cd grouphhear
 
 # 2. Add dependencies
-flutter pub add multicast_dns  # For mDNS fallback discovery
-flutter pub add opus_dart       # Opus codec bindings
-flutter pub add permission_handler  # Mic + Wi-Fi permissions
-flutter pub add provider        # State management
+flutter pub add multicast_dns
+flutter pub add opus_dart
+flutter pub add permission_handler
+flutter pub add provider
 
 # 3. Project structure
 lib/
 ├── main.dart
-├── models/
-│   ├── session.dart       # Session data model
-│   └── audio_packet.dart  # Packet format
 ├── services/
-│   ├── audio_capture.dart  # Platform-native mic capture
-│   ├── audio_player.dart   # Platform-native playback
-│   ├── udp_streamer.dart   # UDP multicast send/recv
-│   ├── discovery.dart      # UDP broadcast discovery
-│   └── jitter_buffer.dart  # Adaptive buffer
+│   ├── system_audio_capture.dart  # ★ Captures ANY playing audio
+│   ├── udp_streamer.dart          # UDP multicast send/recv
+│   ├── discovery.dart             # UDP broadcast discovery
+│   └── jitter_buffer.dart         # Adaptive buffer
 ├── screens/
-│   ├── home_screen.dart    # Role selection
-│   ├── host_screen.dart    # Host streaming UI
-│   └── listener_screen.dart # Listener UI
+│   ├── host_screen.dart           # Host UI (now playing)
+│   └── listener_screen.dart       # Listener UI
 └── widgets/
-    ├── audio_visualizer.dart
-    └── session_card.dart`}
-                    />
+    └── audio_visualizer.dart`} />
+                  </CardContent>
+                </Card>
+
+                {/* System Audio Capture - the key part */}
+                <Card className="border-orange-500/30">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Music className="w-5 h-5 text-orange-400" />
+                      System Audio Capture (The Magic Part)
+                    </CardTitle>
+                    <CardDescription>
+                      How to capture audio from YouTube, Spotify, or any app
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <div className="bg-orange-500/5 border border-orange-500/20 rounded-lg p-4 space-y-3">
+                      <h4 className="font-semibold text-orange-400 text-sm">Android — MediaProjection API</h4>
+                      <p className="text-sm text-muted-foreground">
+                        Android&apos;s <code className="bg-muted px-1 rounded text-xs">MediaProjection</code> API captures
+                        system audio from <em>any</em> app. The user grants permission once, then you get a
+                        PCM audio stream of whatever is playing — YouTube, Spotify, games, notifications, everything.
+                      </p>
+                      <CodeBlock code={`// Android: SystemAudioCapture.kt (MethodChannel)
+class SystemAudioCapture : FlutterPlugin, MethodCallHandler {
+    private var mediaProjection: MediaProjection? = null
+    private var audioRecord: AudioRecord? = null
+    
+    fun startSystemAudioCapture(result: MethodChannel.Result) {
+        // 1. Request MediaProjection permission (shows system dialog)
+        val projectionManager = context.getSystemService(
+            Context.MEDIA_PROJECTION_SERVICE
+        ) as MediaProjectionManager
+        
+        // This triggers the system permission dialog
+        val intent = projectionManager.createScreenCaptureIntent()
+        
+        // 2. After user grants permission, create AudioRecord
+        // with VOICE_COMMUNICATION or DEFAULT source
+        val config = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(48000)
+            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+            .build()
+            
+        val audioRecord = AudioRecord.Builder()
+            .setAudioSource(MediaRecorder.AudioSource.DEFAULT)
+            .setAudioFormat(config)
+            .build()
+        
+        // 3. Read PCM data in a loop and send to Flutter
+        audioRecord.startRecording()
+        val buffer = ShortArray(4096)
+        
+        Thread {
+            while (isRecording) {
+                val read = audioRecord.read(buffer, 0, buffer.size)
+                // Send PCM data to Flutter via MethodChannel/EventChannel
+                eventSink?.success(buffer.copyOf(read))
+            }
+        }.start()
+    }
+}`} />
+                    </div>
+
+                    <div className="bg-rose-500/5 border border-rose-500/20 rounded-lg p-4 space-y-3">
+                      <h4 className="font-semibold text-rose-400 text-sm">iOS — AVAudioEngine with Mix With Others</h4>
+                      <p className="text-sm text-muted-foreground">
+                        iOS doesn&apos;t allow raw system audio capture, but you can use <code className="bg-muted px-1 rounded text-xs">AVAudioSession</code> with
+                        the <code className="bg-muted px-1 rounded text-xs">.mixWithOthers</code> category to capture
+                        microphone audio that includes background music. For true system audio, iOS requires
+                        the Broadcast Upload Extension (used by screen recording apps).
+                      </p>
+                      <CodeBlock code={`// iOS: SystemAudioCapture.swift (MethodChannel)
+class SystemAudioCapture: NSObject, FlutterPlugin {
+    private var engine: AVAudioEngine?
+    
+    func startCapture(result: @escaping FlutterResult) {
+        // 1. Set audio session to mix with other apps
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(
+            .playAndRecord,
+            options: [.mixWithOthers, .defaultToSpeaker]
+        )
+        try? session.setActive(true)
+        
+        // 2. Create audio engine with tap on input node
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        
+        // 3. Install tap to capture audio buffer
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) {
+            buffer, time in
+            // This captures mic + any mixed-in audio
+            let channelData = buffer.floatChannelData?[0]
+            let data = Data(bytes: channelData!, 
+                          count: Int(buffer.frameLength) * 4)
+            self.eventSink?(data)
+        }
+        
+        try? engine.start()
+        self.engine = engine
+        result(true)
+    }
+}
+
+// For TRUE system audio (no mic), use Broadcast Upload Extension:
+// RPBroadcastActivityViewController + SampleHandler
+// This is the same API used by iOS screen recording apps`} />
+                    </div>
                   </CardContent>
                 </Card>
 
                 <Card>
                   <CardHeader>
-                    <CardTitle>Core UDP Multicast Service</CardTitle>
-                    <CardDescription>
-                      The heart of the streaming engine
-                    </CardDescription>
+                    <CardTitle>UDP Multicast Streaming Service</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <CodeBlock
-                      language="dart"
-                      code={`// lib/services/udp_streamer.dart
+                    <CodeBlock code={`// lib/services/udp_streamer.dart
 import 'dart:io';
 import 'dart:typed_data';
 
 class UdpStreamer {
   static const String multicastGroup = '239.255.0.1';
   static const int multicastPort = 4010;
-  static const int mtu = 1400; // Safe UDP payload size
-
+  
   RawDatagramSocket? _sendSocket;
   RawDatagramSocket? _recvSocket;
   InternetAddress? _groupAddress;
@@ -1651,9 +1174,8 @@ class UdpStreamer {
     _sendSocket = await RawDatagramSocket.bind(
       InternetAddress.anyIPv4, multicastPort
     );
-    // Set multicast TTL (1 = local network only)
     _sendSocket!.multicastLoopback = false;
-    _sendSocket!.multicastHops = 1;
+    _sendSocket!.multicastHops = 1; // Local network only
   }
 
   Future<void> initReceiver() async {
@@ -1661,22 +1183,20 @@ class UdpStreamer {
       InternetAddress.anyIPv4, multicastPort
     );
     _groupAddress = InternetAddress(multicastGroup);
-    // Join multicast group
     _recvSocket!.joinMulticast(_groupAddress!);
     _recvSocket!.multicastLoopback = false;
   }
 
+  // Called when we get PCM data from system audio capture
   void sendAudioFrame(Uint8List opusFrame) {
     if (_sendSocket == null) return;
-    // Build packet: [magic(2)][seq(4)][ts(4)][codec(1)][payload]
+    // Packet: [magic(2)][seq(4)][ts(4)][codec(1)][payload(≤1400)]
     final buf = BytesBuilder();
-    buf.addByte(0xAC); buf.addByte(0xDC); // Magic
-    buf.add(_int32Bytes(_seqNum++));       // Sequence
-    buf.add(_int32Bytes(                    // Timestamp
-      DateTime.now().millisecondsSinceEpoch
-    ));
-    buf.addByte(1);                         // Codec: Opus
-    buf.add(opusFrame);                     // Payload
+    buf.addByte(0xAC); buf.addByte(0xDC);
+    buf.add(_int32Bytes(_seqNum++));
+    buf.add(_int32Bytes(DateTime.now().millisecondsSinceEpoch));
+    buf.addByte(1); // Codec: Opus
+    buf.add(opusFrame);
     _sendSocket!.send(buf.toBytes(), _groupAddress!, multicastPort);
   }
 
@@ -1684,329 +1204,155 @@ class UdpStreamer {
     await for (final datagram in _recvSocket!) {
       if (datagram == null) continue;
       final data = datagram.data;
-      // Validate magic bytes
       if (data[0] != 0xAC || data[1] != 0xDC) continue;
-      // Extract payload (skip 11-byte header)
-      yield data.sublist(11);
+      yield data.sublist(11); // Skip 11-byte header
     }
   }
 
-  Uint8List _int32Bytes(int value) =>
-    Uint8List(4)..buffer.asByteData().setInt32(0, value);
-
-  void dispose() {
-    _sendSocket?.close();
-    _recvSocket?.close();
-  }
-}`}
-                    />
+  Uint8List _int32Bytes(int v) => 
+    Uint8List(4)..buffer.asByteData().setInt32(0, v);
+  void dispose() { _sendSocket?.close(); _recvSocket?.close(); }
+}`} />
                   </CardContent>
                 </Card>
 
                 <Card>
                   <CardHeader>
-                    <CardTitle>Discovery Service</CardTitle>
-                    <CardDescription>
-                      UDP broadcast for auto-discovery
-                    </CardDescription>
+                    <CardTitle>Auto-Discovery Service</CardTitle>
                   </CardHeader>
-                  <CardContent className="space-y-4">
-                    <CodeBlock
-                      language="dart"
-                      code={`// lib/services/discovery.dart
+                  <CardContent>
+                    <CodeBlock code={`// lib/services/discovery.dart
 import 'dart:io';
 import 'dart:convert';
 
 class DiscoveryService {
   static const int broadcastPort = 4020;
-  static const Duration announceInterval = Duration(seconds: 2);
-
-  RawDatagramSocket? _socket;
-  Timer? _announceTimer;
-  String? _sessionId;
-
-  // Host: Start broadcasting presence
+  
+  // Host: Broadcast presence every 2 seconds
   Future<void> startAnnouncing(String sessionName) async {
-    _sessionId = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
-    _socket = await RawDatagramSocket.bind(
+    final socket = await RawDatagramSocket.bind(
       InternetAddress.anyIPv4, broadcastPort
     );
-    _socket!.broadcastEnabled = true;
-
-    _announceTimer = Timer.periodic(announceInterval, (_) {
+    socket.broadcastEnabled = true;
+    
+    Timer.periodic(Duration(seconds: 2), (_) {
       final beacon = jsonEncode({
         'type': 'announce',
-        'sessionId': _sessionId,
         'hostName': sessionName,
         'timestamp': DateTime.now().millisecondsSinceEpoch,
       });
-      _socket!.send(
-        utf8.encode(beacon),
-        InternetAddress('255.255.255.255'),
-        broadcastPort,
-      );
+      socket.send(utf8.encode(beacon),
+        InternetAddress('255.255.255.255'), broadcastPort);
     });
   }
 
-  // Client: Listen for host announcements
-  Future<List<DiscoveredHost>> discover({
-    Duration timeout = const Duration(seconds: 5),
-  }) async {
+  // Client: Listen for hosts (5 second scan)
+  Future<List<DiscoveredHost>> discover() async {
     final socket = await RawDatagramSocket.bind(
       InternetAddress.anyIPv4, broadcastPort
     );
     final hosts = <String, DiscoveredHost>{};
-
+    
     socket.listen((event) {
       if (event == RawSocketEvent.read) {
-        final datagram = socket.receive();
-        if (datagram == null) return;
-        final data = jsonDecode(utf8.decode(datagram.data));
+        final dg = socket.receive();
+        if (dg == null) return;
+        final data = jsonDecode(utf8.decode(dg.data));
         if (data['type'] == 'announce') {
-          hosts[data['sessionId']] = DiscoveredHost(
-            sessionId: data['sessionId'],
+          hosts[data['hostName']] = DiscoveredHost(
             hostName: data['hostName'],
-            address: datagram.address,
+            address: dg.address,
           );
         }
       }
     });
-
-    await Future.delayed(timeout);
+    
+    await Future.delayed(Duration(seconds: 5));
     socket.close();
     return hosts.values.toList();
   }
-
-  void stopAnnouncing() {
-    _announceTimer?.cancel();
-    _socket?.close();
-  }
-}
-
-class DiscoveredHost {
-  final String sessionId;
-  final String hostName;
-  final InternetAddress address;
-  DiscoveredHost({
-    required this.sessionId,
-    required this.hostName,
-    required this.address,
-  });
-}`}
-                    />
+}`} />
                   </CardContent>
                 </Card>
               </TabsContent>
 
-              {/* Android Publishing Tab */}
+              {/* Android Tab */}
               <TabsContent value="android" className="space-y-6">
                 <Card>
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2">
-                      <Terminal className="w-5 h-5 text-emerald-400" />
-                      Android: Build & Publish to Google Play
+                      <Terminal className="w-5 h-5 text-orange-400" /> Android: Build &amp; Publish
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-6">
                     <div className="space-y-4">
                       <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 1</Badge>
-                        Configure Permissions
+                        <Badge variant="secondary">Step 1</Badge> Permissions
                       </h4>
-                      <CodeBlock
-                        code={`<!-- android/app/src/main/AndroidManifest.xml -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Required permissions -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
-    
-    <!-- Wi-Fi Multicast lock -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-</manifest>`}
-                      />
+                      <CodeBlock code={'<!-- android/app/src/main/AndroidManifest.xml -->\n<uses-permission android:name="android.permission.RECORD_AUDIO" />\n<uses-permission android:name="android.permission.INTERNET" />\n<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />\n<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />\n<!-- Required for system audio capture -->\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />'} />
                     </div>
 
                     <div className="space-y-4">
                       <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 2</Badge>
-                        Generate Signing Key
+                        <Badge variant="secondary">Step 2</Badge> Build Release
                       </h4>
-                      <CodeBlock
-                        code={`# Generate upload keystore
-keytool -genkey -v -keystore localcast-upload.jks \\
-  -keyalg RSA -keysize 2048 -validity 10000 \\
-  -alias localcast
-
-# Create key.properties
-echo "storePassword=YOUR_PASSWORD" > android/key.properties
-echo "keyPassword=YOUR_PASSWORD" >> android/key.properties
-echo "keyAlias=localcast" >> android/key.properties
-echo "storeFile=../localcast-upload.jks" >> android/key.properties`}
-                      />
+                      <CodeBlock code={"# Generate signing key\nkeytool -genkey -v -keystore grouphhear-upload.jks \\\n  -keyalg RSA -keysize 2048 -validity 10000 -alias grouphhear\n\n# Build AAB for Google Play\nflutter build appbundle --release\n# Output: build/app/outputs/bundle/release/app-release.aab\n\n# Build APK for direct distribution\nflutter build apk --release\n# Output: build/app/outputs/flutter-apk/app-release.apk"} />
                     </div>
 
                     <div className="space-y-4">
                       <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 3</Badge>
-                        Build Release AAB
-                      </h4>
-                      <CodeBlock
-                        code={`# Build Android App Bundle (AAB)
-flutter build appbundle --release
-
-# Output: build/app/outputs/bundle/release/app-release.aab
-
-# Optional: Build APK for direct distribution
-flutter build apk --release
-# Output: build/app/outputs/flutter-apk/app-release.apk`}
-                      />
-                    </div>
-
-                    <div className="space-y-4">
-                      <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 4</Badge>
-                        Publish to Google Play
-                      </h4>
-                      <div className="bg-muted/50 rounded-lg p-4 space-y-3 text-sm">
-                        <p>1. Go to{" "}
-                          <a
-                            href="https://play.google.com/console"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-emerald-400 hover:underline"
-                          >
-                            Google Play Console <ExternalLink className="w-3 h-3 inline" />
-                          </a>
-                        </p>
-                        <p>2. Create a new app → Fill in store listing details</p>
-                        <p>3. Upload the AAB file under <strong>Release → Production</strong></p>
-                        <p>4. Complete the content questionnaire (no data collection = simpler)</p>
-                        <p>5. Add store assets: icon (512x512), screenshots, feature graphic</p>
-                        <p>6. Submit for review (typically 1-3 days for new apps)</p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-4">
-                      <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 5</Badge>
-                        Alternative: Direct APK Distribution
+                        <Badge variant="secondary">Step 3</Badge> Publish to Google Play
                       </h4>
                       <div className="bg-muted/50 rounded-lg p-4 space-y-2 text-sm">
-                        <p>For sideloading without Google Play:</p>
-                        <CodeBlock
-                          code={`# Build a universal APK
-flutter build apk --release --target-platform android-arm64
-
-# Share via your website or GitHub Releases
-# Users enable "Install from unknown sources" on their device`}
-                        />
+                        <p>1. Go to <a href="https://play.google.com/console" target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline">Google Play Console <ExternalLink className="w-3 h-3 inline" /></a></p>
+                        <p>2. Create app → Upload AAB → Fill store listing</p>
+                        <p>3. Add screenshots, icon (512x512), feature graphic</p>
+                        <p>4. Content rating: No data collection = simple questionnaire</p>
+                        <p>5. Submit for review (1-3 days)</p>
                       </div>
                     </div>
                   </CardContent>
                 </Card>
               </TabsContent>
 
-              {/* iOS Publishing Tab */}
+              {/* iOS Tab */}
               <TabsContent value="ios" className="space-y-6">
                 <Card>
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2">
-                      <Package className="w-5 h-5 text-cyan-400" />
-                      iOS: Build & Publish to App Store
+                      <Package className="w-5 h-5 text-rose-400" /> iOS: Build &amp; Publish
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-6">
                     <div className="space-y-4">
                       <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 1</Badge>
-                        Configure Permissions (Info.plist)
+                        <Badge variant="secondary">Step 1</Badge> Permissions (Info.plist)
                       </h4>
-                      <CodeBlock
-                        code={`<!-- ios/Runner/Info.plist -->
-<key>NSMicrophoneUsageDescription</key>
-<string>LocalCast needs microphone access to stream your audio to listeners.</string>
-<key>NSLocalNetworkUsageDescription</key>
-<string>LocalCast uses your local Wi-Fi to stream audio to nearby devices.</string>
-<key>NSBonjourServices</key>
-<array>
-  <string>_localcast._tcp</string>
-</array>`}
-                      />
+                      <CodeBlock code={"<key>NSMicrophoneUsageDescription</key>\n<string>GroupHear captures audio to share with listeners on your Wi-Fi.</string>\n<key>NSLocalNetworkUsageDescription</key>\n<string>GroupHear uses your local Wi-Fi to stream audio to nearby devices.</string>\n<key>NSBonjourServices</key>\n<array><string>_grouphhear._tcp</string></array>"} />
                     </div>
 
                     <div className="space-y-4">
                       <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 2</Badge>
-                        Apple Developer Setup
+                        <Badge variant="secondary">Step 2</Badge> Build &amp; Upload
                       </h4>
-                      <div className="bg-muted/50 rounded-lg p-4 space-y-3 text-sm">
-                        <p>1. Enroll in the{" "}
-                          <a
-                            href="https://developer.apple.com/programs/"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-cyan-400 hover:underline"
-                          >
-                            Apple Developer Program <ExternalLink className="w-3 h-3 inline" />
-                          </a>
-                          {" "}(€99/year)
-                        </p>
-                        <p>2. Create an App ID with <strong>Audio</strong> and <strong>Local Network</strong> capabilities</p>
-                        <p>3. Create a Distribution Certificate in Xcode → Settings → Accounts</p>
-                        <p>4. Create a Provisioning Profile for App Store distribution</p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-4">
-                      <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 3</Badge>
-                        Build & Upload
-                      </h4>
-                      <CodeBlock
-                        code={`# Build iOS release
+                      <CodeBlock code={`# Build IPA
 flutter build ipa --release
 
-# Output: build/ios/ipa/localcast.ipa
-
-# Upload via Xcode Organizer
-# 1. Open Xcode → Window → Organizer
-# 2. Select your archive → Distribute App → App Store Connect
-# 3. Follow the upload wizard
-
-# OR upload via command line:
+# Upload via Xcode Organizer or:
 xcrun altool --upload-app \\
-  --type ios \\
-  --file build/ios/ipa/localcast.ipa \\
-  --apiKey YOUR_API_KEY \\
-  --apiIssuer YOUR_ISSUER_ID`}
-                      />
+  --type ios --file build/ios/ipa/grouphhear.ipa \\
+  --apiKey YOUR_KEY --apiIssuer YOUR_ID`} />
                     </div>
 
                     <div className="space-y-4">
                       <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Step 4</Badge>
-                        App Store Connect Submission
+                        <Badge variant="secondary">Step 3</Badge> App Store Connect
                       </h4>
-                      <div className="bg-muted/50 rounded-lg p-4 space-y-3 text-sm">
-                        <p>1. Go to{" "}
-                          <a
-                            href="https://appstoreconnect.apple.com"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-cyan-400 hover:underline"
-                          >
-                            App Store Connect <ExternalLink className="w-3 h-3 inline" />
-                          </a>
-                        </p>
-                        <p>2. Create new app → Fill in metadata, screenshots, description</p>
-                        <p>3. Select the uploaded build under <strong>Builds</strong></p>
-                        <p>4. Submit for review (typically 24-48 hours)</p>
-                        <p>5. <strong>Important:</strong> In the review notes, explain that the app
-                          requires a local Wi-Fi network and multiple devices to test.</p>
+                      <div className="bg-muted/50 rounded-lg p-4 space-y-2 text-sm">
+                        <p>1. Enroll in <a href="https://developer.apple.com/programs/" target="_blank" rel="noopener noreferrer" className="text-rose-400 hover:underline">Apple Developer Program</a> (€99/year)</p>
+                        <p>2. Create app in App Store Connect → Select uploaded build</p>
+                        <p>3. Submit for review (24-48 hours)</p>
+                        <p>4. <strong>Note in review:</strong> App requires local Wi-Fi + multiple devices to test</p>
                       </div>
                     </div>
 
@@ -2014,17 +1360,10 @@ xcrun altool --upload-app \\
                       <CardContent className="p-4 flex items-start gap-3">
                         <Shield className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
                         <div className="text-sm">
-                          <p className="font-medium text-yellow-400 mb-1">
-                            iOS Multicast Note
-                          </p>
+                          <p className="font-medium text-yellow-400 mb-1">iOS Multicast Entitlement</p>
                           <p className="text-muted-foreground">
-                            iOS restricts raw multicast sockets. Use{" "}
-                            <strong>NSNetService (Bonjour)</strong> for discovery
-                            and <strong>MultipeerConnectivity</strong> or{" "}
-                            <strong>Network.framework NWConnection</strong> with
-                            multicast group subscription for streaming. You&apos;ll
-                            need the <code className="bg-muted px-1 rounded">com.apple.developer.networking.multicast</code>{" "}
-                            entitlement (request from Apple).
+                            iOS restricts raw multicast. Request the <code className="bg-muted px-1 rounded text-xs">com.apple.developer.networking.multicast</code> entitlement
+                            from Apple. Use Bonjour for discovery and Network.framework for multicast subscription.
                           </p>
                         </div>
                       </CardContent>
@@ -2033,128 +1372,39 @@ xcrun altool --upload-app \\
                 </Card>
               </TabsContent>
 
-              {/* Website Publishing Tab */}
+              {/* Website Tab */}
               <TabsContent value="website" className="space-y-6">
                 <Card>
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2">
-                      <Globe className="w-5 h-5 text-emerald-400" />
-                      Website: Deploy the Landing Page
+                      <Globe className="w-5 h-5 text-orange-400" /> Website: Deploy the Landing Page
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-6">
                     <div className="space-y-4">
-                      <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Option A</Badge>
-                        Deploy to Vercel (Recommended)
-                      </h4>
-                      <CodeBlock
-                        code={`# Install Vercel CLI
-npm i -g vercel
-
-# Deploy from project root
-cd /path/to/localcast-website
-vercel
-
-# For production deployment:
+                      <h4 className="font-semibold"><Badge variant="secondary">A</Badge> Vercel (Recommended)</h4>
+                      <CodeBlock code={`npm i -g vercel
+cd grouphhear-website
 vercel --prod
-
-# Your site will be live at:
-# https://localcast.vercel.app
-# (custom domain can be added in Vercel dashboard)`}
-                      />
+# Live at: https://grouphhear.vercel.app`} />
                     </div>
-
                     <div className="space-y-4">
-                      <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Option B</Badge>
-                        Deploy to Netlify
-                      </h4>
-                      <CodeBlock
-                        code={`# Build static export
-# In next.config.ts, add:
-# output: 'export'
-
-npm run build   # Generates /out directory
-
-# Deploy to Netlify
-npx netlify-cli deploy --dir=out --prod
-
-# Or connect your GitHub repo at netlify.com
-# for automatic deploys on every push`}
-                      />
+                      <h4 className="font-semibold"><Badge variant="secondary">B</Badge> Netlify</h4>
+                      <CodeBlock code={`# In next.config.ts: output: 'export'
+npm run build    # Generates /out directory
+npx netlify-cli deploy --dir=out --prod`} />
                     </div>
-
                     <div className="space-y-4">
-                      <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Option C</Badge>
-                        GitHub Pages (Free)
-                      </h4>
-                      <CodeBlock
-                        code={`# 1. Set next.config.ts output to 'export'
-# 2. Set basePath if deploying to a subdirectory:
-#    basePath: '/localcast'
-
-npm run build
-
-# 3. Push the /out directory to gh-pages branch
+                      <h4 className="font-semibold"><Badge variant="secondary">C</Badge> GitHub Pages (Free)</h4>
+                      <CodeBlock code={`npm run build
 npx gh-pages -d out
-
-# 4. Your site: https://yourusername.github.io/localcast/`}
-                      />
+# Live at: https://you.github.io/grouphhear/`} />
                     </div>
-
                     <div className="space-y-4">
-                      <h4 className="font-semibold flex items-center gap-2">
-                        <Badge variant="secondary">Custom Domain</Badge>
-                        Connect Your Own Domain
-                      </h4>
-                      <div className="bg-muted/50 rounded-lg p-4 space-y-2 text-sm">
-                        <p>1. Purchase a domain (e.g., Namecheap, Cloudflare, Google Domains)</p>
-                        <p>2. In your hosting platform (Vercel/Netlify), add the custom domain</p>
-                        <p>3. Update DNS records:</p>
-                        <CodeBlock
-                          code={`# Vercel DNS example:
-A    @       76.76.21.21      # Vercel IP
-CNAME www     cname.vercel-dns.com
-
-# Netlify DNS example:
-A    @       75.2.60.5        # Netlify IP
-CNAME www     your-site.netlify.app`}
-                        />
-                        <p>4. Enable SSL (automatic on Vercel/Netlify)</p>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Website Content Checklist</CardTitle>
-                    <CardDescription>
-                      Everything your landing page needs
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid md:grid-cols-2 gap-4">
-                      {[
-                        { icon: "✅", text: "Hero section with clear value prop" },
-                        { icon: "✅", text: "App store / Play store download links" },
-                        { icon: "✅", text: "Feature highlights with icons" },
-                        { icon: "✅", text: "How it works (3-step diagram)" },
-                        { icon: "✅", text: "Screenshots / demo video" },
-                        { icon: "✅", text: "Privacy policy (no data collection)" },
-                        { icon: "✅", text: "FAQ / Troubleshooting section" },
-                        { icon: "✅", text: "Open source GitHub link (optional)" },
-                      ].map((item, i) => (
-                        <div
-                          key={i}
-                          className="flex items-center gap-2 text-sm"
-                        >
-                          <span>{item.icon}</span>
-                          <span>{item.text}</span>
-                        </div>
-                      ))}
+                      <h4 className="font-semibold">Custom Domain</h4>
+                      <CodeBlock code={`# DNS records for Vercel:
+A      @        76.76.21.21
+CNAME  www      cname.vercel-dns.com`} />
                     </div>
                   </CardContent>
                 </Card>
@@ -2164,56 +1414,24 @@ CNAME www     your-site.netlify.app`}
         </section>
 
         {/* ─── FAQ ─── */}
-        <section className="py-20 md:py-28">
+        <section className="py-20 md:py-28 bg-muted/30 border-y border-border/50">
           <div className="max-w-3xl mx-auto px-4">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="text-center space-y-4 mb-12"
-            >
-              <h2 className="text-3xl font-bold">
-                Frequently Asked Questions
-              </h2>
+            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} className="text-center space-y-4 mb-12">
+              <h2 className="text-3xl font-bold">Frequently Asked Questions</h2>
             </motion.div>
 
             <Accordion type="single" collapsible className="space-y-3">
               {[
-                {
-                  q: "Can this really work without internet?",
-                  a: "Yes! All communication happens over the local Wi-Fi network using UDP multicast and broadcast. No data leaves the network. Even a phone hotspot works — just connect all devices to the same hotspot.",
-                },
-                {
-                  q: "How many devices can connect simultaneously?",
-                  a: "UDP multicast is inherently scalable — one packet reaches all listeners. We've tested with 30 devices on a phone hotspot. The theoretical limit depends on Wi-Fi bandwidth (~8KB/s per Opus stream) and router capacity, easily supporting 100+ devices on a proper router.",
-                },
-                {
-                  q: "What's the latency like?",
-                  a: "On a local Wi-Fi network, end-to-end latency is typically 15-50ms (capture + encode + network + decode + buffer). The jitter buffer adds 50-200ms of additional buffering for smooth playback. Total: ~65-250ms, comparable to Bluetooth audio.",
-                },
-                {
-                  q: "Why UDP multicast instead of TCP/WebRTC?",
-                  a: "Multicast is the only protocol where one packet from the host reaches ALL clients simultaneously. TCP requires a separate connection per client (O(n) bandwidth). WebRTC is peer-to-peer but doesn't support multicast groups. For 30+ listeners, multicast is the only scalable option.",
-                },
-                {
-                  q: "Does this work on iOS?",
-                  a: "Yes, but iOS requires the com.apple.developer.networking.multicast entitlement from Apple. You'll also need to use Bonjour (NSNetService) for discovery and Network.framework for multicast subscription. The iOS implementation uses slightly different APIs but achieves the same result.",
-                },
-                {
-                  q: "Can I stream media audio (not just microphone)?",
-                  a: "On Android, you can use MediaProjection API to capture system audio. On iOS, you can use AVAudioEngine with the .mixWithOthers category to capture app audio. Both platforms also support playing a local file and streaming it through the same pipeline.",
-                },
+                { q: "Can I really stream from YouTube or Spotify?", a: "Yes! On Android, the MediaProjection API captures system audio from any playing app — YouTube, Spotify, Apple Music, games, anything. On iOS, you can use the Broadcast Upload Extension (same API screen recording apps use) to capture any playing audio." },
+                { q: "Does it work without internet?", a: "Absolutely. All communication happens over your local Wi-Fi. Use a router, or just turn on the host phone's hotspot. No data leaves the network. Perfect for road trips, flights, outdoor gatherings." },
+                { q: "How many phones can connect?", a: "We've tested 30 devices on a phone hotspot. UDP multicast means one packet reaches all listeners simultaneously, so the host's bandwidth doesn't increase with more listeners. A proper router can handle 100+ devices." },
+                { q: "What's the latency?", a: "On local Wi-Fi: 15-50ms capture + encode + network + decode. Add 50-200ms jitter buffer for smooth playback. Total: ~65-250ms — similar to Bluetooth audio. Everyone hears at almost the same time." },
+                { q: "Why not just use Bluetooth speakers?", a: "Bluetooth has a 10m range and pairs with one device. GroupHear works over Wi-Fi (50m+ range), supports unlimited listeners, and each person uses their own headphones — no sharing earbuds." },
+                { q: "Does the host phone need to stay on the music app?", a: "On Android, yes — the audio comes from whatever app is in the foreground. On iOS with Broadcast Upload Extension, you can switch apps while streaming continues. The host can also play local music files from within GroupHear." },
               ].map((item, i) => (
-                <AccordionItem
-                  key={i}
-                  value={`faq-${i}`}
-                  className="border rounded-lg px-4"
-                >
-                  <AccordionTrigger className="text-left text-sm font-medium">
-                    {item.q}
-                  </AccordionTrigger>
-                  <AccordionContent className="text-sm text-muted-foreground">
-                    {item.a}
-                  </AccordionContent>
+                <AccordionItem key={i} value={`faq-${i}`} className="border rounded-lg px-4">
+                  <AccordionTrigger className="text-left text-sm font-medium">{item.q}</AccordionTrigger>
+                  <AccordionContent className="text-sm text-muted-foreground">{item.a}</AccordionContent>
                 </AccordionItem>
               ))}
             </Accordion>
@@ -2221,41 +1439,22 @@ CNAME www     your-site.netlify.app`}
         </section>
 
         {/* ─── CTA ─── */}
-        <section className="py-20 bg-gradient-to-br from-emerald-950/40 to-cyan-950/40 border-y border-border/50">
+        <section className="py-20 bg-gradient-to-br from-orange-950/40 to-rose-950/40 border-y border-border/50">
           <div className="max-w-3xl mx-auto px-4 text-center space-y-6">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              className="space-y-4"
-            >
+            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} className="space-y-4">
               <h2 className="text-3xl md:text-4xl font-bold">
-                Ready to Build Your
-                <br />
-                <span className="bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                  Local Audio Network?
-                </span>
+                One Phone Plays.{" "}
+                <span className="bg-gradient-to-r from-orange-400 to-rose-400 bg-clip-text text-transparent">Everyone Listens.</span>
               </h2>
               <p className="text-muted-foreground">
-                Start with the live demo above, then follow the publishing guide
-                to ship your own app.
+                Try the demo now, then build and publish your own app.
               </p>
               <div className="flex justify-center gap-4">
-                <Button
-                  size="lg"
-                  onClick={() => scrollTo("demo")}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                >
-                  <Play className="w-5 h-5 mr-2" />
-                  Try Demo
+                <Button size="lg" onClick={() => scrollTo("demo")} className="bg-orange-600 hover:bg-orange-700 text-white">
+                  <Play className="w-5 h-5 mr-2" /> Try Demo
                 </Button>
-                <Button
-                  size="lg"
-                  variant="outline"
-                  onClick={() => scrollTo("publish")}
-                  className="border-emerald-500/40"
-                >
-                  <Upload className="w-5 h-5 mr-2" />
-                  Publish Guide
+                <Button size="lg" variant="outline" onClick={() => scrollTo("build")} className="border-orange-500/40">
+                  <Upload className="w-5 h-5 mr-2" /> Build &amp; Publish
                 </Button>
               </div>
             </motion.div>
@@ -2268,20 +1467,16 @@ CNAME www     your-site.netlify.app`}
         <div className="max-w-6xl mx-auto px-4">
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded bg-gradient-to-br from-emerald-500 to-cyan-400 flex items-center justify-center">
-                <Radio className="w-3 h-3 text-white" />
+              <div className="w-6 h-6 rounded bg-gradient-to-br from-orange-500 to-rose-500 flex items-center justify-center">
+                <Headphones className="w-3 h-3 text-white" />
               </div>
-              <span className="font-semibold text-sm">LocalCast</span>
-              <span className="text-xs text-muted-foreground">
-                — Local Wi-Fi Audio Streaming
-              </span>
+              <span className="font-semibold text-sm">GroupHear</span>
+              <span className="text-xs text-muted-foreground">— One phone plays, everyone listens</span>
             </div>
             <div className="flex items-center gap-6 text-xs text-muted-foreground">
               <span>No Cloud · No Accounts · No Tracking</span>
               <span className="hidden md:inline">•</span>
-              <span className="hidden md:inline">
-                Built with Flutter + Next.js
-              </span>
+              <span className="hidden md:inline">Built with Flutter + Next.js</span>
             </div>
           </div>
         </div>

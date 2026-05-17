@@ -100,3 +100,29 @@ Work Log:
 Stage Summary:
 - Complete publishing guide covering Flutter code, Android/iOS store submission, and website deployment
 - CodeBlock component with clipboard copy support
+
+---
+Task ID: 7
+Agent: Main Agent
+Task: Complete redesign for GroupHear - music sharing focused app
+
+Work Log:
+- Rebranded from LocalCast (generic audio) to GroupHear (music sharing)
+- Changed color scheme from emerald/cyan to orange/rose (warm, music-focused)
+- Redesigned hero section: "One Phone Plays. Everyone Listens."
+- Added "How It Works" 3-step section with visual network diagram
+- Rebuilt features section for music-specific use case (YouTube, Spotify, any app)
+- Added "System Audio" vs "Microphone" toggle in the demo
+- Implemented getDisplayMedia() for system audio capture in browser demo
+- Added detailed system audio capture code for Android (MediaProjection) and iOS (AVAudioEngine + Broadcast Upload Extension)
+- Updated FAQ with music-specific questions (YouTube support, why not Bluetooth, etc.)
+- Generated new hero image (hero-music.png) and how-it-works image
+- Fixed all React strict mode lint issues (refs in render, components in render, setState in effect)
+- Updated mini-service with audio:source event handler
+
+Stage Summary:
+- Complete redesign focused on music sharing use case
+- Orange/rose color scheme with GroupHear branding
+- System audio capture code for both Android and iOS
+- Browser demo supports both mic and screen/system audio capture
+- All lint checks pass cleanly
