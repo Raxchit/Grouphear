@@ -50,5 +50,7 @@ test
 prompt
 
 server.log
+.zscripts/
+db/
 # Skills directory
 /skills/
